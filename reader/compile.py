@@ -26,6 +26,32 @@ _MOOD_EXAGGERATION = {
     "urgent": 0.7,
     "angry": 0.75,
     "passionate": 0.75,
+    "nervous": 0.6,
+    "fearful": 0.65,
+    "afraid": 0.65,
+    "anxious": 0.6,
+    "sarcastic": 0.6,
+    "mocking": 0.6,
+    "commanding": 0.7,
+    "authoritative": 0.7,
+    "stern": 0.6,
+    "tense": 0.65,
+    "cold": 0.3,
+    "warm": 0.55,
+    "serious": 0.45,
+    "playful": 0.65,
+    "confident": 0.6,
+    "hesitant": 0.4,
+    "gentle": 0.4,
+    "cheerful": 0.65,
+    "somber": 0.3,
+    "desperate": 0.75,
+    "relieved": 0.5,
+    "suspicious": 0.55,
+    "tender": 0.4,
+    "frustrated": 0.7,
+    "disgusted": 0.6,
+    "hopeful": 0.55,
 }
 
 logger = logging.getLogger(__name__)
@@ -104,7 +130,7 @@ def _parse_segments(annotated_text: str) -> list[dict]:
 def _convert_to_mp3(wav_path: Path) -> Path:
     mp3_path = wav_path.with_suffix(".mp3")
     subprocess.run(
-        ["ffmpeg", "-i", str(wav_path), "-q:a", "2", str(mp3_path), "-y"],
+        ["ffmpeg", "-y", "-i", str(wav_path), "-q:a", "2", str(mp3_path)],
         check=True,
         capture_output=True,
     )
@@ -135,8 +161,8 @@ def _concatenate_mp3s(compiled_dir: Path) -> Path:
     out_path = compiled_dir / "full.mp3"
     try:
         subprocess.run(
-            ["ffmpeg", "-f", "concat", "-safe", "0", "-i", str(list_path),
-             "-c", "copy", str(out_path), "-y"],
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
+             "-c", "copy", str(out_path)],
             check=True,
             capture_output=True,
         )
@@ -147,12 +173,16 @@ def _concatenate_mp3s(compiled_dir: Path) -> Path:
     return out_path
 
 
-def _convert_batch(wav_paths: list[Path]) -> None:
+def _convert_batch(wav_paths: list[Path]) -> list[Path]:
+    """Convert each WAV to MP3, returning the paths that failed to convert."""
+    failed = []
     for wav_path in wav_paths:
         try:
             _convert_to_mp3(wav_path)
         except Exception:
             logger.exception("Failed to convert %s to MP3", wav_path.name)
+            failed.append(wav_path)
+    return failed
 
 
 def run_compile(content_hash: str, chapter: int | None = None):
@@ -255,12 +285,14 @@ def run_compile(content_hash: str, chapter: int | None = None):
 
             if len(pending_wavs) == CONVERT_BATCH_SIZE:
                 yield f"data: compile_converting {len(pending_wavs)}\n\n"
-                _convert_batch(pending_wavs)
+                for p in _convert_batch(pending_wavs):
+                    yield f"data: compile_warning Could not convert {p.name} to MP3\n\n"
                 pending_wavs = []
 
         if pending_wavs:
             yield f"data: compile_converting {len(pending_wavs)}\n\n"
-            _convert_batch(pending_wavs)
+            for p in _convert_batch(pending_wavs):
+                yield f"data: compile_warning Could not convert {p.name} to MP3\n\n"
 
         yield "data: compile_finalizing\n\n"
         try:

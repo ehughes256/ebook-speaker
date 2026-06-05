@@ -3,7 +3,7 @@ import pytest
 import soundfile as sf
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
-from reader.compile import run_compile, _convert_batch, _convert_to_mp3, _parse_segments, _split_mixed_segment, _has_mixed_content, _concat_list_entry, _concatenate_mp3s
+from reader.compile import run_compile, _convert_batch, _convert_to_mp3, _parse_segments, _split_mixed_segment, _has_mixed_content, _concat_list_entry, _concatenate_mp3s, _MOOD_EXAGGERATION
 
 
 CONTENT_HASH = "abc123"
@@ -47,7 +47,7 @@ def _mock_synthesize(text, ref_wav_path, exaggeration=0.5):
 
 # --- Pipeline tests (all mock _convert_batch to avoid needing ffmpeg) ---
 
-@patch("reader.compile._convert_batch")
+@patch("reader.compile._convert_batch", return_value=[])
 @patch("reader.compile.synthesize_line", side_effect=_mock_synthesize)
 @patch("reader.compile.get_chatterbox_model", return_value=MagicMock())
 def test_compile_yields_done(mock_model, mock_synth, mock_convert, tmp_path, settings):
@@ -57,7 +57,7 @@ def test_compile_yields_done(mock_model, mock_synth, mock_convert, tmp_path, set
     assert any("done" in e for e in events)
 
 
-@patch("reader.compile._convert_batch")
+@patch("reader.compile._convert_batch", return_value=[])
 @patch("reader.compile.synthesize_line", side_effect=_mock_synthesize)
 @patch("reader.compile.get_chatterbox_model", return_value=MagicMock())
 def test_compile_yields_progress_per_line(mock_model, mock_synth, mock_convert, tmp_path, settings):
@@ -68,7 +68,7 @@ def test_compile_yields_progress_per_line(mock_model, mock_synth, mock_convert, 
     assert len(progress) == 2
 
 
-@patch("reader.compile._convert_batch")
+@patch("reader.compile._convert_batch", return_value=[])
 @patch("reader.compile.synthesize_line", side_effect=_mock_synthesize)
 @patch("reader.compile.get_chatterbox_model", return_value=MagicMock())
 def test_compile_writes_numbered_wav_files(mock_model, mock_synth, mock_convert, tmp_path, settings):
@@ -81,7 +81,7 @@ def test_compile_writes_numbered_wav_files(mock_model, mock_synth, mock_convert,
     assert files[1] == "2_alice.wav"
 
 
-@patch("reader.compile._convert_batch")
+@patch("reader.compile._convert_batch", return_value=[])
 @patch("reader.compile.synthesize_line", side_effect=_mock_synthesize)
 @patch("reader.compile.get_chatterbox_model", return_value=MagicMock())
 def test_compile_calls_synthesize_for_each_line(mock_model, mock_synth, mock_convert, tmp_path, settings):
@@ -91,7 +91,7 @@ def test_compile_calls_synthesize_for_each_line(mock_model, mock_synth, mock_con
     assert mock_synth.call_count == 2
 
 
-@patch("reader.compile._convert_batch")
+@patch("reader.compile._convert_batch", return_value=[])
 @patch("reader.compile.synthesize_line", side_effect=_mock_synthesize)
 @patch("reader.compile.get_chatterbox_model", return_value=MagicMock())
 def test_compile_falls_back_to_narrator_for_missing_speaker_wav(mock_model, mock_synth, mock_convert, tmp_path, settings):
@@ -133,7 +133,7 @@ def test_compile_yields_error_when_narrator_wav_missing(tmp_path, settings):
 
 # --- MP3 conversion tests ---
 
-@patch("reader.compile._convert_batch")
+@patch("reader.compile._convert_batch", return_value=[])
 @patch("reader.compile.synthesize_line", side_effect=_mock_synthesize)
 @patch("reader.compile.get_chatterbox_model", return_value=MagicMock())
 def test_convert_batch_called_once_for_remainder_under_10(mock_model, mock_synth, mock_convert, tmp_path, settings):
@@ -144,7 +144,7 @@ def test_convert_batch_called_once_for_remainder_under_10(mock_model, mock_synth
     assert len(mock_convert.call_args[0][0]) == 2
 
 
-@patch("reader.compile._convert_batch")
+@patch("reader.compile._convert_batch", return_value=[])
 @patch("reader.compile.synthesize_line", side_effect=_mock_synthesize)
 @patch("reader.compile.get_chatterbox_model", return_value=MagicMock())
 def test_convert_batch_triggered_mid_loop_at_10(mock_model, mock_synth, mock_convert, tmp_path, settings):
@@ -155,7 +155,7 @@ def test_convert_batch_triggered_mid_loop_at_10(mock_model, mock_synth, mock_con
     assert len(mock_convert.call_args[0][0]) == 10
 
 
-@patch("reader.compile._convert_batch")
+@patch("reader.compile._convert_batch", return_value=[])
 @patch("reader.compile.synthesize_line", side_effect=_mock_synthesize)
 @patch("reader.compile.get_chatterbox_model", return_value=MagicMock())
 def test_convert_batch_triggered_twice_for_12_lines(mock_model, mock_synth, mock_convert, tmp_path, settings):
@@ -167,7 +167,7 @@ def test_convert_batch_triggered_twice_for_12_lines(mock_model, mock_synth, mock
     assert len(mock_convert.call_args_list[1][0][0]) == 2
 
 
-@patch("reader.compile._convert_batch")
+@patch("reader.compile._convert_batch", return_value=[])
 @patch("reader.compile.synthesize_line", side_effect=_mock_synthesize)
 @patch("reader.compile.get_chatterbox_model", return_value=MagicMock())
 def test_compile_yields_converting_event_before_batch(mock_model, mock_synth, mock_convert, tmp_path, settings):
@@ -274,6 +274,42 @@ def test_convert_batch_continues_on_individual_failure(tmp_path):
     wav2.write_bytes(b"fake")
     with patch("reader.compile._convert_to_mp3", side_effect=RuntimeError("ffmpeg missing")):
         _convert_batch([wav1, wav2])  # must not raise
+
+
+def test_convert_batch_returns_failed_paths(tmp_path):
+    wav1 = tmp_path / "1_narrator.wav"
+    wav2 = tmp_path / "2_alice.wav"
+    wav1.write_bytes(b"fake")
+    wav2.write_bytes(b"fake")
+    # First succeeds, second raises -> only the second is reported as failed.
+    with patch("reader.compile._convert_to_mp3",
+               side_effect=[wav1.with_suffix(".mp3"), RuntimeError("ffmpeg missing")]):
+        failed = _convert_batch([wav1, wav2])
+    assert failed == [wav2]
+
+
+# --- mood -> exaggeration mapping (FIX #29) ---
+
+def test_mood_exaggeration_unmapped_falls_back_to_default():
+    # An unknown mood is not in the table; run_compile defaults it to 0.5.
+    assert "flabbergasted" not in _MOOD_EXAGGERATION
+    assert _MOOD_EXAGGERATION.get("flabbergasted", 0.5) == 0.5
+
+
+def test_mood_exaggeration_newly_added_mood_maps_to_value():
+    assert _MOOD_EXAGGERATION.get("nervous", 0.5) == 0.6
+
+
+# --- F4: failed MP3 conversion surfaces as compile_warning ---
+
+@patch("reader.compile._convert_to_mp3", side_effect=RuntimeError("ffmpeg blew up"))
+@patch("reader.compile.synthesize_line", side_effect=_mock_synthesize)
+@patch("reader.compile.get_chatterbox_model", return_value=MagicMock())
+def test_compile_yields_warning_when_conversion_fails(mock_model, mock_synth, mock_convert, tmp_path, settings):
+    settings.OUTPUTS_DIR = tmp_path
+    _setup_output_dir(tmp_path)  # 2 segments -> 2 wavs in the remainder batch
+    events = list(run_compile(CONTENT_HASH))
+    assert any("compile_warning" in e and "Could not convert" in e for e in events)
 
 
 # --- ffmpeg preflight (FIX #14a) ---

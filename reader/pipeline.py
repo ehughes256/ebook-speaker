@@ -76,6 +76,9 @@ def run_pipeline(content_hash: str, text: str, title: str):
                     speakers = []
                 per_chunk_speakers.append(speakers)
             merged_speakers = merge_speakers(per_chunk_speakers)
+            for s in merged_speakers:
+                s.setdefault("aliases", [])
+                s.setdefault("nationality", "")
 
             # Pass 2: annotate each chunk
             annotated_chunks = []
@@ -181,8 +184,19 @@ def run_book_pipeline(content_hash: str, chapters: list[dict], title: str):
                 for s in known_speakers:
                     for alias in s.get("aliases", []):
                         known_names_lower.add(alias.lower())
-                truly_new = [s for s in merged_chapter if s["name"].lower() not in known_names_lower]
+                # A candidate is new only if NEITHER its name NOR any of its own
+                # aliases intersect the known names/aliases — otherwise it's an
+                # alias-only re-introduction of an existing speaker.
+                truly_new = []
+                for s in merged_chapter:
+                    candidate_keys = {s["name"].lower()} | {a.lower() for a in s.get("aliases", [])}
+                    if candidate_keys & known_names_lower:
+                        continue
+                    truly_new.append(s)
                 known_speakers = known_speakers + truly_new
+                for s in known_speakers:
+                    s.setdefault("aliases", [])
+                    s.setdefault("nationality", "")
                 write_speakers([narrator_entry] + known_speakers, out_dir)
 
                 # Pass 2: annotate chapter with full cumulative speaker list

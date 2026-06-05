@@ -106,6 +106,22 @@ def test_normalize_speaker_names_leaves_unknown_names_unchanged():
     assert "[UNKNOWN PERSON | mood=angry]" in result[0]
 
 
+def test_normalize_speaker_names_preserves_non_mood_attributes():
+    speakers = [{"name": "Alice"}]
+    chunks = ['[alice | mood=happy | speed=fast] "Hi."']
+    result = normalize_speaker_names(chunks, speakers)
+    # Name normalized to canonical casing, ALL attributes preserved verbatim.
+    assert "[Alice | mood=happy | speed=fast]" in result[0]
+
+
+def test_normalize_speaker_names_regression_narrator_and_mood():
+    speakers = [{"name": "Alice"}]
+    chunks = ['[narrator] It was quiet.\n[alice | mood=happy] "Hi."']
+    result = normalize_speaker_names(chunks, speakers)
+    assert "[NARRATOR]" in result[0]
+    assert "[Alice | mood=happy]" in result[0]
+
+
 def test_write_speakers_preserves_narrator_attributes(tmp_path, settings):
     settings.OUTPUTS_DIR = tmp_path
     out_dir = ensure_output_dir("abc123")

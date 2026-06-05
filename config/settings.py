@@ -63,9 +63,9 @@ DATABASES = {
 STATIC_URL = "/static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-OPENAI_API_KEY = config("OPENAI_API_KEY")
+OPENAI_API_KEY = config("OPENAI_API_KEY", default="")
 OPENAI_MODEL = config("OPENAI_MODEL", default="gpt-5.4-mini")
-ELEVENLABS_API_KEY = config("ELEVENLABS_API_KEY")
+ELEVENLABS_API_KEY = config("ELEVENLABS_API_KEY", default="")
 OUTPUTS_DIR = BASE_DIR / "outputs"
 
 MAX_UPLOAD_MB = config("MAX_UPLOAD_MB", default=50, cast=int)

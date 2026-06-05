@@ -122,7 +122,7 @@ def normalize_speaker_names(annotated_chunks: list[str], speakers: list[dict]) -
         for alias in s.get("aliases", []):
             lookup[alias.lower()] = s["name"]
 
-    _TAG_RE = re.compile(r"\[([^\]|]+?)((?:\s*\|\s*mood=[^\]]+)?)\]")
+    _TAG_RE = re.compile(r"\[([^\]|]+?)((?:\s*\|[^\]]*)?)\]")
 
     def _replace(m: re.Match) -> str:
         raw_name = m.group(1).strip()

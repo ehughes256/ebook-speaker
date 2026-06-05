@@ -102,6 +102,37 @@ def test_book_pipeline_passes_known_speakers_to_extract(
 @patch("reader.pipeline.write_speakers")
 @patch("reader.pipeline.annotate_chunk")
 @patch("reader.pipeline.extract_speakers")
+def test_book_pipeline_dedups_alias_only_matches_across_chapters(
+    mock_extract, mock_annotate, mock_write_s, mock_write_a,
+    mock_get_model, mock_gen_voice, tmp_path, settings
+):
+    # Chapter 1 introduces "Alice". Chapter 2 introduces a candidate whose
+    # NAME is new ("Allie") but whose ALIAS is "Alice" — i.e. the same person
+    # re-introduced under a nickname. The cast must NOT gain a duplicate.
+    settings.OUTPUTS_DIR = tmp_path
+    ch1_speakers = [{"name": "Alice", "sex": "female", "age": "30s", "traits": "brave"}]
+    ch2_speakers = [{"name": "Allie", "sex": "female", "age": "30s", "traits": "brave", "aliases": ["Alice"]}]
+    # extract_speakers is called once per chunk; one chunk per short chapter.
+    mock_extract.side_effect = [ch1_speakers, ch2_speakers]
+    mock_annotate.return_value = MOCK_ANNOTATED
+    mock_get_model.return_value = MagicMock()
+
+    list(run_book_pipeline("abc123", CHAPTERS, "Test Book"))
+
+    # Inspect the final write_speakers call: should be NARRATOR + exactly one
+    # character (Alice), not two — the alias-only re-introduction was deduped.
+    final_speakers = mock_write_s.call_args_list[-1][0][0]
+    characters = [s for s in final_speakers if s["name"] != "NARRATOR"]
+    assert len(characters) == 1, f"expected 1 character, got {[s['name'] for s in characters]}"
+    assert characters[0]["name"] == "Alice"
+
+
+@patch("reader.pipeline.generate_voice_sample")
+@patch("reader.pipeline.get_tts_model")
+@patch("reader.pipeline.write_annotated")
+@patch("reader.pipeline.write_speakers")
+@patch("reader.pipeline.annotate_chunk")
+@patch("reader.pipeline.extract_speakers")
 def test_book_pipeline_skips_voice_for_existing_speakers(
     mock_extract, mock_annotate, mock_write_s, mock_write_a,
     mock_get_model, mock_gen_voice, tmp_path, settings

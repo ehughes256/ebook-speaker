@@ -244,7 +244,7 @@ def _generate_voice_elevenlabs(speaker: dict, voices_dir: Path) -> Path:
     out_path = voices_dir / f"{slug}.wav"
     try:
         subprocess.run(
-            ["ffmpeg", "-i", tmp_mp3, str(out_path), "-y"],
+            ["ffmpeg", "-y", "-i", tmp_mp3, str(out_path)],
             check=True,
             capture_output=True,
         )
