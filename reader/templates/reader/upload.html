@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ebook Narrator — Upload</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 60px auto; padding: 0 20px; }
+  h1 { font-size: 1.6rem; margin-bottom: 8px; }
+  .subtitle { color: #666; margin-bottom: 32px; }
+  .tab-bar { display: flex; gap: 0; margin-bottom: 0; }
+  .tab { padding: 10px 20px; cursor: pointer; border: 1px solid #ccc; background: #f5f5f5; font-size: 0.9rem; }
+  .tab.active { background: #fff; border-bottom-color: #fff; font-weight: 600; }
+  .panel { border: 1px solid #ccc; padding: 20px; }
+  textarea { width: 100%; box-sizing: border-box; height: 200px; font-family: monospace; font-size: 0.85rem; resize: vertical; }
+  input[type=file] { width: 100%; }
+  .btn-submit { margin-top: 16px; padding: 10px 24px; background: #1a1a1a; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+  .btn-submit:hover { background: #333; }
+  .hidden { display: none; }
+  .recent { margin-top: 40px; }
+  .recent h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.06em; color: #999; margin-bottom: 12px; }
+  .recent-list { list-style: none; padding: 0; margin: 0; }
+  .recent-list li { display: flex; justify-content: space-between; align-items: baseline; padding: 8px 0; border-bottom: 1px solid #eee; }
+  .recent-list li:last-child { border-bottom: none; }
+  .recent-list a { text-decoration: none; color: #1a1a1a; font-size: 0.9rem; }
+  .recent-list a:hover { text-decoration: underline; }
+  .recent-date { font-size: 0.78rem; color: #999; white-space: nowrap; margin-left: 16px; }
+  .recent-meta { display: flex; align-items: baseline; gap: 12px; flex-shrink: 0; }
+  .btn-delete { font-size: 0.78rem; color: #c00; background: none; border: none; cursor: pointer; padding: 0; }
+  .btn-delete:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;">
+  <h1 style="margin:0;">Ebook Narrator</h1>
+  <a href="{% url 'reader:listen' %}" style="font-size:0.85rem;color:#555;text-decoration:none;">▶ Listen</a>
+</div>
+<p class="subtitle">Upload an ebook or paste text to generate an annotated narration script.</p>
+
+<form method="post" action="{% url 'reader:process' %}" enctype="multipart/form-data">
+  {% csrf_token %}
+  <div class="tab-bar">
+    <div class="tab active" id="tab-text" onclick="showTab('text')">Paste Text</div>
+    <div class="tab" id="tab-file" onclick="showTab('file')">Upload File</div>
+  </div>
+  <div class="panel" id="panel-text">
+    <label for="input_text">Paste your text below:</label><br><br>
+    <textarea id="input_text" name="input_text" placeholder="Paste the text of your book or story here..."></textarea>
+  </div>
+  <div class="panel hidden" id="panel-file">
+    <label for="input_file">Choose a file (.txt, .pdf, .epub):</label><br><br>
+    <input type="file" id="input_file" name="input_file" accept=".txt,.pdf,.epub">
+  </div>
+  <button type="submit" class="btn-submit">Analyze &amp; Annotate</button>
+</form>
+
+{% if recent_books %}
+<div class="recent">
+  <h2>Recent recordings</h2>
+  <ul class="recent-list">
+    {% for book in recent_books %}
+    <li>
+      <a href="{% url 'reader:results' book.content_hash %}">{{ book.title }}</a>
+      <span class="recent-meta">
+        <span class="recent-date">{{ book.created_at|date:"M j, Y" }}</span>
+        <form method="post" action="{% url 'reader:delete' book.content_hash %}" style="margin:0" onsubmit="return confirm('Delete \u201c{{ book.title|escapejs }}\u201d?')">
+          {% csrf_token %}
+          <button type="submit" class="btn-delete">Delete</button>
+        </form>
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<script>
+function showTab(tab) {
+  document.getElementById('panel-text').classList.toggle('hidden', tab !== 'text');
+  document.getElementById('panel-file').classList.toggle('hidden', tab !== 'file');
+  document.getElementById('tab-text').classList.toggle('active', tab === 'text');
+  document.getElementById('tab-file').classList.toggle('active', tab === 'file');
+  if (tab === 'text') document.getElementById('input_file').value = '';
+  else document.getElementById('input_text').value = '';
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Processing — {{ book.title }}</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 600px; margin: 80px auto; padding: 0 20px; text-align: center; }
+  h1 { font-size: 1.4rem; }
+  .status { color: #555; margin: 12px 0 32px; }
+  .bar-wrap { background: #eee; border-radius: 8px; height: 12px; overflow: hidden; margin-bottom: 16px; }
+  .bar { height: 100%; background: #1a1a1a; border-radius: 8px; width: 5%; transition: width 0.4s ease; }
+  .log { font-size: 0.85rem; color: #777; min-height: 24px; }
+  .warnings { font-size: 0.8rem; color: #a60; margin-top: 8px; text-align: left; }
+  .error { color: #c00; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>{{ book.title }}</h1>
+<p class="status" id="status-msg">Connecting...</p>
+<div class="bar-wrap"><div class="bar" id="bar"></div></div>
+<p class="log" id="log"></p>
+<div class="warnings" id="warnings"></div>
+
+<script>
+const streamUrl = "{% url 'reader:stream' content_hash=book.content_hash %}";
+const resultsUrl = "{% url 'reader:results' content_hash=book.content_hash %}";
+
+const source = new EventSource(streamUrl);
+const bar = document.getElementById('bar');
+const statusMsg = document.getElementById('status-msg');
+const log = document.getElementById('log');
+const warnings = document.getElementById('warnings');
+
+var totalChapters = 1;
+var currentChapter = 0;
+
+source.onmessage = function(e) {
+  const data = e.data.trim();
+  if (data === 'parsing') {
+    statusMsg.textContent = 'Parsing document...';
+    bar.style.width = '5%';
+  } else if (data.startsWith('chapter_start ')) {
+    const parts = data.split(' ');
+    currentChapter = parseInt(parts[1]);
+    totalChapters = parseInt(parts[2]);
+    const chTitle = parts.slice(3).join(' ');
+    statusMsg.textContent = 'Chapter ' + currentChapter + ' of ' + totalChapters + ': ' + chTitle;
+    bar.style.width = Math.round(((currentChapter - 1) / totalChapters) * 90) + '%';
+  } else if (data.startsWith('chapter_done ')) {
+    const parts = data.split(' ');
+    bar.style.width = Math.round((parseInt(parts[1]) / parseInt(parts[2])) * 90) + '%';
+  } else if (data === 'done') {
+    source.close();
+    statusMsg.textContent = 'Done! Redirecting...';
+    bar.style.width = '100%';
+    setTimeout(() => window.location.href = resultsUrl, 600);
+  } else if (data.startsWith('chunk_progress ')) {
+    const parts = data.split(' ');
+    const n = parseInt(parts[1]);
+    const total = parseInt(parts[2]);
+    if (totalChapters > 1) {
+      const base = ((currentChapter - 1) / totalChapters) * 90;
+      const span = (1 / totalChapters) * 90 * 0.6;
+      bar.style.width = Math.round(base + (n / total) * span) + '%';
+    } else {
+      bar.style.width = Math.round(10 + (n / total) * 83) + '%';
+    }
+    statusMsg.textContent = totalChapters > 1
+      ? 'Ch ' + currentChapter + ' — annotating chunk ' + n + ' of ' + total + '...'
+      : 'Annotating chunk ' + n + ' of ' + total + '...';
+    log.textContent = '';
+  } else if (data === 'voices_start') {
+    statusMsg.textContent = 'Generating character voices...';
+  } else if (data.startsWith('voice_progress ')) {
+    const parts = data.split(' ');
+    statusMsg.textContent = 'Generating voice ' + parts[1] + ' of ' + parts[2] + '...';
+  } else if (data.startsWith('voice_warning ')) {
+    const p = document.createElement('p');
+    p.textContent = '⚠ ' + data.slice('voice_warning '.length);
+    warnings.appendChild(p);
+  } else if (data.startsWith('error ')) {
+    source.close();
+    const span = document.createElement('span');
+    span.className = 'error';
+    span.textContent = 'Error: ' + data.slice(6);
+    statusMsg.textContent = '';
+    statusMsg.appendChild(span);
+  }
+};
+
+source.onerror = function() {
+  source.close();
+  const span = document.createElement('span');
+  span.className = 'error';
+  span.textContent = 'Connection lost. Please try again.';
+  statusMsg.textContent = '';
+  statusMsg.appendChild(span);
+};
+</script>
+</body>
+</html>

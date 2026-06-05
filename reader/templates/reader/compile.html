@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compiling — {{ book.title }}</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 600px; margin: 80px auto; padding: 0 20px; text-align: center; }
+  h1 { font-size: 1.4rem; }
+  .status { color: #555; margin: 12px 0 32px; }
+  .bar-wrap { background: #eee; border-radius: 8px; height: 12px; overflow: hidden; margin-bottom: 16px; }
+  .bar { height: 100%; background: #1a1a1a; border-radius: 8px; width: 5%; transition: width 0.4s ease; }
+  .warnings { font-size: 0.8rem; color: #a60; margin-top: 8px; text-align: left; }
+  .error { color: #c00; font-weight: 600; }
+  .done-msg { display: none; margin-top: 24px; }
+  .done-msg a { color: #1a1a1a; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<h1>{{ book.title }}</h1>
+{% if chapter_title %}<p style="color:#999;font-size:0.9rem;margin:-8px 0 20px;">{{ chapter_title }}</p>{% elif chapter %}<p style="color:#999;font-size:0.9rem;margin:-8px 0 20px;">Chapter {{ chapter }}</p>{% endif %}
+<p class="status" id="status-msg">Connecting...</p>
+<div class="bar-wrap"><div class="bar" id="bar"></div></div>
+<div class="warnings" id="warnings"></div>
+<div class="done-msg" id="done-msg">
+  <p>Done. Files written to <code>compiled/</code>.</p>
+  <a href="{% url 'reader:results' content_hash=book.content_hash %}">← Back to results</a>
+</div>
+
+<script>
+const streamUrl = "{% if chapter %}{% url 'reader:compile_stream_chapter' content_hash=book.content_hash chapter=chapter %}{% else %}{% url 'reader:compile_stream' content_hash=book.content_hash %}{% endif %}";
+
+const source = new EventSource(streamUrl);
+const bar = document.getElementById('bar');
+const statusMsg = document.getElementById('status-msg');
+const warnings = document.getElementById('warnings');
+const doneMsg = document.getElementById('done-msg');
+
+function setError(msg) {
+  const span = document.createElement('span');
+  span.className = 'error';
+  span.textContent = msg;
+  statusMsg.textContent = '';
+  statusMsg.appendChild(span);
+}
+
+source.onmessage = function(e) {
+  const data = e.data.trim();
+  if (data.startsWith('compile_progress ')) {
+    const parts = data.split(' ');
+    const n = parseInt(parts[1]);
+    const total = parseInt(parts[2]);
+    const pct = Math.round((n / total) * 100);
+    bar.style.width = pct + '%';
+    statusMsg.textContent = `Synthesizing line ${n} of ${total}...`;
+  } else if (data.startsWith('compile_warning ')) {
+    const p = document.createElement('p');
+    p.textContent = '⚠ ' + data.slice('compile_warning '.length);
+    warnings.appendChild(p);
+  } else if (data.startsWith('compile_converting ')) {
+    const n = parseInt(data.split(' ')[1]);
+    statusMsg.textContent = `Converting ${n} file${n === 1 ? '' : 's'} to MP3...`;
+  } else if (data === 'compile_finalizing') {
+    statusMsg.textContent = 'Combining into full.mp3...';
+  } else if (data === 'done') {
+    source.close();
+    bar.style.width = '100%';
+    statusMsg.textContent = 'Complete!';
+    doneMsg.style.display = 'block';
+  } else if (data.startsWith('error ')) {
+    source.close();
+    setError('Error: ' + data.slice(6));
+  }
+};
+
+source.onerror = function() {
+  source.close();
+  setError('Connection lost. Please try again.');
+};
+</script>
+</body>
+</html>

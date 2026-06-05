@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ book.title }} — Listen</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 0; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 12px 24px; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+  .header-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .header-cover { width: 36px; height: 48px; object-fit: cover; border-radius: 2px; flex-shrink: 0; }
+  header h1 { font-size: 1.1rem; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header a { font-size: 0.85rem; color: #555; text-decoration: none; margin-left: 16px; white-space: nowrap; }
+  .player-bar { padding: 12px 24px; border-bottom: 1px solid #ddd; background: #fafafa; flex-shrink: 0; }
+  .player-bar audio { width: 100%; height: 40px; }
+  .now-playing { font-size: 0.78rem; color: #999; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .layout { display: flex; flex: 1; overflow: hidden; }
+  .sidebar { width: 280px; min-width: 200px; border-right: 1px solid #ddd; overflow-y: auto; flex-shrink: 0; }
+  .chapter-item { padding: 14px 16px; cursor: pointer; border-bottom: 1px solid #f0f0f0; font-size: 0.88rem; color: #333; display: flex; align-items: center; gap: 10px; }
+  .chapter-item:hover { background: #f5f5f5; }
+  .chapter-item.active { background: #1a1a1a; color: #fff; }
+  .chapter-num { font-size: 0.75rem; opacity: 0.5; min-width: 24px; }
+  .chapter-title { flex: 1; }
+  .main { flex: 1; display: flex; align-items: center; justify-content: center; color: #ccc; font-size: 0.9rem; padding: 24px; }
+  .sleep-btn { font-size: 0.85rem; color: #555; text-decoration: none; margin-left: 16px; cursor: pointer; background: none; border: none; padding: 0; font-family: inherit; white-space: nowrap; }
+  .sleep-btn.active { background: #1a1a1a; color: #fff; border-radius: 4px; padding: 2px 8px; }
+  .sleep-anchor { position: relative; display: inline-block; }
+  .sleep-popover { display: none; position: absolute; right: 0; top: calc(100% + 8px); background: #fff; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); padding: 14px 16px; width: 220px; z-index: 100; }
+  .sleep-popover.open { display: block; }
+  .sleep-popover::before { content: ''; position: absolute; top: -6px; right: 20px; width: 10px; height: 10px; background: #fff; border-left: 1px solid #ddd; border-top: 1px solid #ddd; transform: rotate(45deg); }
+  .sleep-popover-label { font-size: 0.7rem; font-weight: 600; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
+  .sleep-remaining { font-weight: 400; color: #bbb; text-transform: none; letter-spacing: 0; }
+  .sleep-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; margin-bottom: 12px; }
+  .sleep-grid button { padding: 6px 0; border: 1px solid #ccc; border-radius: 5px; background: #f5f5f5; font-size: 0.75rem; cursor: pointer; font-family: inherit; }
+  .sleep-grid button.active { border-color: #1a1a1a; background: #1a1a1a; color: #fff; }
+  .sleep-finish { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; color: #444; cursor: pointer; border-top: 1px solid #f0f0f0; padding-top: 10px; margin: 0; }
+  @media (max-width: 600px) {
+    header { padding: 10px 16px; }
+    .player-bar { padding: 10px 16px; }
+    .layout { flex-direction: column; }
+    .sidebar { width: 100%; min-width: unset; border-right: none; border-top: 1px solid #ddd; max-height: 45vh; }
+    .main { display: none; }
+    .chapter-item { padding: 12px 16px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="header-left">
+    {% if has_cover %}<img class="header-cover" src="{% url 'reader:cover' book.content_hash %}" alt="">{% endif %}
+    <h1>{{ book.title }}</h1>
+  </div>
+  <div>
+    <a href="{% url 'reader:results' book.content_hash %}">Script</a>
+    <a href="{% url 'reader:listen' %}">← Library</a>
+    <span class="sleep-anchor">
+      <button class="sleep-btn" id="sleep-btn">🌙</button>
+      <div class="sleep-popover" id="sleep-popover">
+        <div class="sleep-popover-label">Sleep timer <span class="sleep-remaining" id="sleep-remaining"></span></div>
+        <div class="sleep-grid">
+          <button data-mins="15">15m</button>
+          <button data-mins="30">30m</button>
+          <button data-mins="45">45m</button>
+          <button data-mins="60">60m</button>
+          <button data-mins="120">2h</button>
+          <button data-mins="0">Off</button>
+        </div>
+        <label class="sleep-finish">
+          <input type="checkbox" id="sleep-finish-cb">
+          Finish current chapter first
+        </label>
+      </div>
+    </span>
+  </div>
+</header>
+
+<div class="player-bar">
+  <div class="now-playing" id="now-playing">Select a chapter to begin</div>
+  <audio id="player" controls style="width:100%"></audio>
+</div>
+
+<div class="layout">
+  <div class="sidebar" id="sidebar">
+    {% for ch in chapters %}
+    <div class="chapter-item" data-index="{{ ch.index }}" data-url="{{ ch.audio_url }}" data-title="{{ ch.title }}">
+      <span class="chapter-num">{{ ch.index }}</span>
+      <span class="chapter-title">{{ ch.title }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="main" id="main-hint">Choose a chapter from the list</div>
+</div>
+
+<script>
+(function () {
+  var STORAGE_KEY = 'reader_pos_{{ book.content_hash }}';
+  var player = document.getElementById('player');
+  var nowPlaying = document.getElementById('now-playing');
+  var items = Array.from(document.querySelectorAll('.chapter-item'));
+
+  function setActive(item) {
+    items.forEach(function(i) { i.classList.remove('active'); });
+    item.classList.add('active');
+    item.scrollIntoView({ block: 'nearest' });
+  }
+
+  function loadChapter(item, autoplay, saveInitial) {
+    setActive(item);
+    player.src = item.dataset.url;
+    nowPlaying.textContent = item.dataset.title;
+    document.getElementById('main-hint').style.display = 'none';
+    lastSaved = 0;
+    if (autoplay) {
+      player.play();
+    }
+    if (saveInitial !== false) {
+      savePos(item.dataset.index, 0);
+    }
+  }
+
+  function nextChapter(currentIndex) {
+    var next = items.find(function(i) { return parseInt(i.dataset.index) > parseInt(currentIndex); });
+    return next || null;
+  }
+
+  function savePos(chapterIndex, time) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ chapter: chapterIndex, time: time }));
+    } catch(e) {}
+  }
+
+  function loadPos() {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY));
+    } catch(e) { return null; }
+  }
+
+  items.forEach(function(item) {
+    item.addEventListener('click', function() { loadChapter(item, true); });
+  });
+
+  // Sleep timer
+  var sleepBtn = document.getElementById('sleep-btn');
+  var sleepPopover = document.getElementById('sleep-popover');
+  var sleepRemaining = document.getElementById('sleep-remaining');
+  var sleepFinishCb = document.getElementById('sleep-finish-cb');
+  var SLEEP_PREF_KEY = 'reader_sleep_finish_chapter';
+  var sleepTimeout = null;
+  var sleepInterval = null;
+  var sleepDeadline = null;
+  var stopAfterChapter = false;
+
+  sleepFinishCb.checked = localStorage.getItem(SLEEP_PREF_KEY) === 'true';
+  sleepFinishCb.addEventListener('change', function() {
+    localStorage.setItem(SLEEP_PREF_KEY, String(sleepFinishCb.checked));
+  });
+
+  function formatCountdown(ms) {
+    var secs = Math.max(0, Math.round(ms / 1000));
+    var h = Math.floor(secs / 3600);
+    var m = Math.floor((secs % 3600) / 60);
+    var s = secs % 60;
+    if (h > 0) return h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+    return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+  }
+
+  function clearSleepTimer() {
+    if (sleepTimeout) { clearTimeout(sleepTimeout); sleepTimeout = null; }
+    if (sleepInterval) { clearInterval(sleepInterval); sleepInterval = null; }
+    sleepDeadline = null;
+    stopAfterChapter = false;
+    sleepBtn.textContent = '🌙';
+    sleepBtn.classList.remove('active');
+    sleepRemaining.textContent = '';
+    document.querySelectorAll('.sleep-grid button').forEach(function(b) { b.classList.remove('active'); });
+  }
+
+  function onSleepExpired() {
+    clearInterval(sleepInterval); sleepInterval = null;
+    sleepTimeout = null;
+    if (sleepFinishCb.checked) {
+      stopAfterChapter = true;
+      sleepBtn.textContent = '🌙';
+      sleepBtn.classList.remove('active');
+      sleepRemaining.textContent = '';
+    } else {
+      player.pause();
+      clearSleepTimer();
+    }
+  }
+
+  function startSleepTimer(mins) {
+    clearSleepTimer();
+    var ms = mins * 60 * 1000;
+    sleepDeadline = Date.now() + ms;
+    sleepBtn.classList.add('active');
+    document.querySelectorAll('.sleep-grid button').forEach(function(b) {
+      b.classList.toggle('active', parseInt(b.dataset.mins) === mins);
+    });
+    sleepTimeout = setTimeout(onSleepExpired, ms);
+    sleepInterval = setInterval(function() {
+      var left = sleepDeadline - Date.now();
+      if (left <= 0) return;
+      sleepBtn.textContent = '🌙 ' + formatCountdown(left);
+      sleepRemaining.textContent = '· ' + formatCountdown(left) + ' left';
+    }, 1000);
+  }
+
+  sleepBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    sleepPopover.classList.toggle('open');
+  });
+
+  document.querySelectorAll('.sleep-grid button').forEach(function(b) {
+    b.addEventListener('click', function() {
+      var mins = parseInt(b.dataset.mins);
+      if (mins === 0) { clearSleepTimer(); } else { startSleepTimer(mins); }
+      sleepPopover.classList.remove('open');
+    });
+  });
+
+  document.addEventListener('click', function(e) {
+    if (!sleepPopover.contains(e.target) && e.target !== sleepBtn) {
+      sleepPopover.classList.remove('open');
+    }
+  });
+
+  player.addEventListener('ended', function() {
+    if (stopAfterChapter) {
+      stopAfterChapter = false;
+      return;
+    }
+    var active = document.querySelector('.chapter-item.active');
+    var next = active ? nextChapter(active.dataset.index) : null;
+    if (next) {
+      loadChapter(next, true);
+    }
+  });
+
+  var lastSaved = 0;
+  player.addEventListener('timeupdate', function() {
+    var active = document.querySelector('.chapter-item.active');
+    if (active && player.currentTime - lastSaved >= 5) {
+      lastSaved = player.currentTime;
+      savePos(active.dataset.index, player.currentTime);
+    }
+  });
+
+  var saved = loadPos();
+  if (saved) {
+    var resumeItem = items.find(function(i) { return String(i.dataset.index) === String(saved.chapter); });
+    if (resumeItem) {
+      loadChapter(resumeItem, false, false);
+      player.addEventListener('loadedmetadata', function onLoad() {
+        player.currentTime = saved.time || 0;
+        player.removeEventListener('loadedmetadata', onLoad);
+      });
+    }
+  } else if (items.length > 0) {
+    loadChapter(items[0], false);
+  }
+})();
+</script>
+</body>
+</html>

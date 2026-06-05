@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compiling — {{ book.title }}</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 80px auto; padding: 0 20px; text-align: center; }
+  h1 { font-size: 1.4rem; }
+  .subtitle { color: #999; font-size: 0.9rem; margin: 4px 0 32px; }
+  .overall-bar-wrap { background: #eee; border-radius: 8px; height: 8px; overflow: hidden; margin-bottom: 24px; }
+  .overall-bar { height: 100%; background: #1a1a1a; border-radius: 8px; width: 0%; transition: width 0.4s ease; }
+  .chapter-list { list-style: none; padding: 0; margin: 0 0 24px; text-align: left; }
+  .chapter-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #f0f0f0; font-size: 0.88rem; }
+  .chapter-row:last-child { border-bottom: none; }
+  .chapter-status { width: 20px; text-align: center; flex-shrink: 0; }
+  .chapter-name { flex: 1; color: #555; }
+  .chapter-name.active { color: #1a1a1a; font-weight: 600; }
+  .chapter-name.done { color: #999; }
+  .chapter-bar-wrap { width: 120px; background: #eee; border-radius: 4px; height: 6px; overflow: hidden; flex-shrink: 0; }
+  .chapter-bar { height: 100%; background: #1a1a1a; border-radius: 4px; width: 0%; transition: width 0.3s ease; }
+  .status-msg { color: #555; font-size: 0.88rem; min-height: 20px; margin-bottom: 8px; }
+  .warnings { font-size: 0.8rem; color: #a60; margin-top: 8px; text-align: left; }
+  .error { color: #c00; font-weight: 600; }
+  .done-msg { display: none; margin-top: 24px; }
+  .done-msg a { color: #1a1a1a; font-size: 0.9rem; margin: 0 8px; }
+  .nothing-msg { color: #999; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<h1>{{ book.title }}</h1>
+<p class="subtitle">Compiling audio for all chapters</p>
+
+{% if missing %}
+<div class="overall-bar-wrap"><div class="overall-bar" id="overall-bar"></div></div>
+<p class="status-msg" id="status-msg">Starting...</p>
+
+<ul class="chapter-list" id="chapter-list">
+{% for ch in missing %}
+<li class="chapter-row" id="row-{{ forloop.counter0 }}">
+  <span class="chapter-status" id="status-{{ forloop.counter0 }}">○</span>
+  <span class="chapter-name" id="name-{{ forloop.counter0 }}">{{ ch.title }}</span>
+  <div class="chapter-bar-wrap"><div class="chapter-bar" id="bar-{{ forloop.counter0 }}"></div></div>
+</li>
+{% endfor %}
+</ul>
+
+<div class="warnings" id="warnings"></div>
+<div class="done-msg" id="done-msg">
+  <p>All chapters compiled.</p>
+  <a href="{% url 'reader:results' book.content_hash %}">← Results</a>
+  <a href="{% url 'reader:listen_book' book.content_hash %}">▶ Listen</a>
+</div>
+
+<script>
+var chapters = [
+  {% for ch in missing %}
+  { streamUrl: "{{ ch.stream_url }}", title: "{{ ch.title|escapejs }}" }{% if not forloop.last %},{% endif %}
+  {% endfor %}
+];
+var total = chapters.length;
+var current = 0;
+var overallBar = document.getElementById('overall-bar');
+var statusMsg = document.getElementById('status-msg');
+var warnings = document.getElementById('warnings');
+
+function setError(msg) {
+  var span = document.createElement('span');
+  span.className = 'error';
+  span.textContent = msg;
+  statusMsg.textContent = '';
+  statusMsg.appendChild(span);
+}
+
+function compileNext() {
+  if (current >= total) {
+    overallBar.style.width = '100%';
+    statusMsg.textContent = 'All done!';
+    document.getElementById('done-msg').style.display = 'block';
+    return;
+  }
+
+  var idx = current;
+  var ch = chapters[idx];
+  var rowName = document.getElementById('name-' + idx);
+  var rowStatus = document.getElementById('status-' + idx);
+  var chBar = document.getElementById('bar-' + idx);
+
+  rowName.className = 'chapter-name active';
+  rowStatus.textContent = '▶';
+  statusMsg.textContent = 'Compiling: ' + ch.title;
+
+  var source = new EventSource(ch.streamUrl);
+
+  source.onmessage = function(e) {
+    var data = e.data.trim();
+    if (data.startsWith('compile_progress ')) {
+      var parts = data.split(' ');
+      var n = parseInt(parts[1]), t = parseInt(parts[2]);
+      chBar.style.width = Math.round((n / t) * 100) + '%';
+      overallBar.style.width = Math.round(((idx + n / t) / total) * 100) + '%';
+    } else if (data.startsWith('compile_converting ')) {
+      statusMsg.textContent = 'Converting to MP3…';
+    } else if (data === 'compile_finalizing') {
+      statusMsg.textContent = 'Finalizing ' + ch.title + '…';
+    } else if (data.startsWith('compile_warning ')) {
+      var p = document.createElement('p');
+      p.textContent = '⚠ ' + data.slice('compile_warning '.length);
+      warnings.appendChild(p);
+    } else if (data === 'done') {
+      source.close();
+      chBar.style.width = '100%';
+      rowStatus.textContent = '✓';
+      rowName.className = 'chapter-name done';
+      current++;
+      overallBar.style.width = Math.round((current / total) * 100) + '%';
+      compileNext();
+    } else if (data.startsWith('error ')) {
+      source.close();
+      rowStatus.textContent = '✗';
+      setError('Error on "' + ch.title + '": ' + data.slice(6));
+    }
+  };
+
+  source.onerror = function() {
+    source.close();
+    rowStatus.textContent = '✗';
+    setError('Connection lost on "' + ch.title + '".');
+  };
+}
+
+compileNext();
+</script>
+
+{% else %}
+<p class="nothing-msg">All chapters already have compiled audio.</p>
+<p><a href="{% url 'reader:results' book.content_hash %}">← Back to results</a></p>
+{% endif %}
+</body>
+</html>

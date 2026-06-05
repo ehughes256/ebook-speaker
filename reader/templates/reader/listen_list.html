@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audiobook Library</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 60px auto; padding: 0 20px; }
+  .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 32px; }
+  h1 { font-size: 1.6rem; margin: 0; }
+  .header a { font-size: 0.85rem; color: #555; text-decoration: none; }
+  .book-list { list-style: none; padding: 0; margin: 0; }
+  .book-item { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; border-bottom: 1px solid #eee; gap: 12px; }
+  .book-item:last-child { border-bottom: none; }
+  .book-cover { width: 48px; height: 64px; object-fit: cover; border-radius: 3px; flex-shrink: 0; background: #f0f0f0; }
+  .book-info { flex: 1; min-width: 0; }
+  .book-title { font-size: 1rem; font-weight: 600; color: #1a1a1a; text-decoration: none; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .book-title:hover { text-decoration: underline; }
+  .book-meta { font-size: 0.82rem; color: #999; margin-top: 3px; }
+  .play-btn { padding: 10px 18px; background: #1a1a1a; color: #fff; border: none; border-radius: 4px; font-size: 0.85rem; text-decoration: none; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
+  .play-btn:hover { background: #333; }
+  .empty { color: #999; font-size: 0.9rem; margin-top: 40px; text-align: center; }
+  @media (max-width: 480px) {
+    body { margin: 24px auto; }
+    .header { margin-bottom: 20px; }
+    h1 { font-size: 1.3rem; }
+  }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Library</h1>
+  <a href="{% url 'reader:upload' %}">← Upload</a>
+</div>
+
+{% if available %}
+<ul class="book-list">
+  {% for entry in available %}
+  <li class="book-item">
+    {% if entry.has_cover %}<img class="book-cover" src="{% url 'reader:cover' entry.book.content_hash %}" alt="">{% endif %}
+    <div class="book-info">
+      <a class="book-title" href="{% url 'reader:listen_book' entry.book.content_hash %}">{{ entry.book.title }}</a>
+      <div class="book-meta">
+        {{ entry.chapter_count }} chapter{{ entry.chapter_count|pluralize }} with audio
+      </div>
+    </div>
+    <a class="play-btn" href="{% url 'reader:listen_book' entry.book.content_hash %}">▶ Play</a>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No audiobooks available yet. Upload a book and compile its audio first.</p>
+{% endif %}
+</body>
+</html>

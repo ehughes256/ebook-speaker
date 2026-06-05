@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ book.title }} — Narration Script</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 0; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 16px 24px; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center; }
+  header h1 { font-size: 1.2rem; margin: 0; }
+  header a { font-size: 0.85rem; color: #555; text-decoration: none; margin-left: 16px; }
+  .audio-bar { padding: 8px 24px; border-bottom: 1px solid #ddd; background: #fafafa; }
+  .audio-bar audio { width: 100%; height: 32px; }
+  .panels { display: flex; flex: 1; overflow: hidden; }
+  .panel { overflow-y: auto; padding: 20px 24px; }
+  .panel-speakers { width: 280px; min-width: 220px; border-right: 1px solid #ddd; background: #fafafa; flex-shrink: 0; }
+  .panel-annotated { flex: 1; }
+  .speaker-card { margin-bottom: 16px; padding: 12px; background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; }
+  .speaker-name { font-weight: 700; font-size: 0.9rem; display: flex; align-items: center; gap: 8px; }
+  .speaker-attrs { font-size: 0.78rem; color: #666; margin-top: 4px; }
+  .btn-play, .btn-regen { background: none; border: 1px solid #ccc; border-radius: 50%; width: 24px; height: 24px; cursor: pointer; font-size: 0.65rem; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; color: #555; padding: 0; }
+  .btn-play:hover, .btn-regen:hover { border-color: #888; color: #111; }
+  .btn-play.playing { border-color: #1a1a1a; color: #1a1a1a; }
+  .btn-regen.loading { opacity: 0.4; cursor: not-allowed; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .btn-edit { font-size: 0.72rem; color: #999; background: none; border: none; cursor: pointer; padding: 0; margin-top: 6px; display: block; }
+  .btn-edit:hover { color: #555; text-decoration: underline; }
+  .speaker-edit-form { display: none; margin-top: 8px; }
+  .speaker-edit-form label { font-size: 0.75rem; color: #888; display: block; margin-top: 6px; }
+  .speaker-edit-form input { width: 100%; box-sizing: border-box; font-size: 0.82rem; border: 1px solid #ccc; border-radius: 3px; padding: 3px 6px; margin-top: 2px; }
+  .speaker-edit-actions { margin-top: 8px; display: flex; gap: 8px; }
+  .btn-save { font-size: 0.78rem; background: #1a1a1a; color: #fff; border: none; border-radius: 3px; padding: 4px 10px; cursor: pointer; }
+  .btn-save:hover { background: #333; }
+  .btn-cancel { font-size: 0.78rem; background: none; border: 1px solid #ccc; border-radius: 3px; padding: 4px 10px; cursor: pointer; color: #555; }
+  .btn-cancel:hover { border-color: #888; }
+  .line { margin-bottom: 6px; line-height: 1.6; font-size: 0.9rem; }
+  .line.narrator { color: #888; }
+  .line.dialogue .speaker-tag { font-weight: 700; font-size: 0.78rem; letter-spacing: 0.02em; }
+  .line.dialogue .mood-tag { font-style: italic; font-size: 0.78rem; color: #888; }
+  .line.dialogue .dialogue-text { margin-left: 4px; }
+  .line.raw { color: #aaa; font-style: italic; font-size: 0.8rem; }
+  h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.06em; color: #999; margin-bottom: 16px; }
+  .chapter-bar { padding: 8px 24px; border-bottom: 1px solid #ddd; background: #f5f5f5; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .chapter-bar span { font-size: 0.78rem; color: #999; text-transform: uppercase; letter-spacing: 0.05em; }
+  .btn-chapter { font-size: 0.82rem; padding: 4px 12px; border: 1px solid #ccc; border-radius: 3px; background: #fff; cursor: pointer; color: #333; }
+  .btn-chapter.active { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+  .btn-chapter:hover:not(.active) { border-color: #888; }
+  .chapter-select { font-size: 0.85rem; border: 1px solid #ccc; border-radius: 3px; padding: 4px 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>{{ book.title }}</h1>
+  {% if has_full_audio %}<a href="{% url 'reader:listen_book' book.content_hash %}">▶ Listen</a>{% endif %}
+  {% if has_missing_audio %}<a href="{% url 'reader:compile_all' book.content_hash %}">Compile all</a>{% endif %}
+  <a href="{% if current_chapter %}{% url 'reader:compile_chapter' content_hash=book.content_hash chapter=current_chapter %}{% else %}{% url 'reader:compile' content_hash=book.content_hash %}{% endif %}" id="compile-link">Compile audio</a>
+  <a href="{% url 'reader:upload' %}">← New book</a>
+</header>
+{% if has_full_audio %}
+<div class="audio-bar" id="audio-bar">
+  <audio controls src="{% if current_chapter %}{% url 'reader:full_audio_chapter' book.content_hash current_chapter %}{% else %}{% url 'reader:full_audio' book.content_hash %}{% endif %}" id="audio-player"></audio>
+</div>
+{% else %}
+<div class="audio-bar" id="audio-bar" style="display:none">
+  <audio controls id="audio-player"></audio>
+</div>
+{% endif %}
+{% if chapters %}
+<div class="chapter-bar">
+  <span>Chapter</span>
+  {% if chapters|length <= 8 %}
+    {% for ch in chapters %}
+    <button class="btn-chapter {% if ch.index == current_chapter %}active{% endif %}"
+            data-chapter="{{ ch.index }}"
+            data-content-url="{% url 'reader:chapter_content' book.content_hash ch.index %}"
+            data-compile-url="{% url 'reader:compile_chapter' book.content_hash ch.index %}"
+            data-audio-url="{% url 'reader:full_audio_chapter' book.content_hash ch.index %}">
+      {{ ch.title }}
+    </button>
+    {% endfor %}
+  {% else %}
+  <select class="chapter-select" id="chapter-select">
+    {% for ch in chapters %}
+    <option value="{{ ch.index }}"
+            data-content-url="{% url 'reader:chapter_content' book.content_hash ch.index %}"
+            data-compile-url="{% url 'reader:compile_chapter' book.content_hash ch.index %}"
+            data-audio-url="{% url 'reader:full_audio_chapter' book.content_hash ch.index %}"
+            {% if ch.index == current_chapter %}selected{% endif %}>
+      {{ ch.title }}
+    </option>
+    {% endfor %}
+  </select>
+  {% endif %}
+</div>
+{% endif %}
+<div class="panels">
+  <div class="panel panel-speakers">
+    <h2>Characters</h2>
+    {% for speaker in speakers %}
+    <div class="speaker-card">
+      <div class="speaker-name">
+        {{ speaker.name }}
+        {% if speaker.has_voice %}
+        <button class="btn-play" data-src="{% url 'reader:voice' book.content_hash speaker.slug %}" title="Play voice sample">▶</button>
+        {% endif %}
+        <button class="btn-regen" data-regen-url="{% url 'reader:regenerate_voice' book.content_hash speaker.slug %}" title="Regenerate voice">↺</button>
+      </div>
+      <div class="speaker-attrs" id="attrs-{{ speaker.slug }}">
+        {% if speaker.sex %}{{ speaker.sex }}{% endif %}
+        {% if speaker.age %} · {{ speaker.age }}{% endif %}
+        {% if speaker.nationality %} · {{ speaker.nationality }}{% endif %}
+        {% if speaker.traits %}<br>{{ speaker.traits }}{% endif %}
+        {% if speaker.aliases %}<br><span style="color:#aaa;font-size:0.75rem">also: {{ speaker.aliases|join:", " }}</span>{% endif %}
+      </div>
+      <button class="btn-edit" data-slug="{{ speaker.slug }}">Edit description</button>
+      <div class="speaker-edit-form" id="form-{{ speaker.slug }}"
+           data-update-url="{% url 'reader:update_speaker' book.content_hash speaker.slug %}">
+        <label>Sex<input type="text" name="sex" value="{{ speaker.sex|default:'' }}"></label>
+        <label>Age<input type="text" name="age" value="{{ speaker.age|default:'' }}"></label>
+        <label>Nationality<input type="text" name="nationality" value="{{ speaker.nationality|default:'' }}"></label>
+        <label>Aliases (comma-separated)<input type="text" name="aliases" value="{{ speaker.aliases|join:', '|default:'' }}"></label>
+        <label>Traits<input type="text" name="traits" value="{{ speaker.traits|default:'' }}"></label>
+        <div class="speaker-edit-actions">
+          <button class="btn-save">Save</button>
+          <button class="btn-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="panel panel-annotated">
+    <h2>Annotated Script</h2>
+    {% for line in annotated_lines %}
+      {% if line.type == "narrator" %}
+        <p class="line narrator">{{ line.text }}</p>
+      {% elif line.type == "dialogue" %}
+        <p class="line dialogue">
+          <span class="speaker-tag">{{ line.speaker }}</span>
+          {% if line.mood %}<span class="mood-tag"> ({{ line.mood }})</span>{% endif %}
+          <span class="dialogue-text">{{ line.text }}</span>
+        </p>
+      {% else %}
+        <p class="line raw">{{ line.text }}</p>
+      {% endif %}
+    {% endfor %}
+  </div>
+</div>
+<script>
+(function () {
+  var csrfToken = '{{ csrf_token }}';
+  var current = null;
+  var currentHasFullAudio = {{ has_full_audio|yesno:"true,false" }};
+
+  document.getElementById('compile-link').addEventListener('click', function(e) {
+    if (currentHasFullAudio && !confirm('A compiled version already exists. Start over and replace it?')) {
+      e.preventDefault();
+    }
+  });
+
+  function initPlay(btn) {
+    btn.addEventListener('click', function () {
+      if (current && current !== btn._audio) {
+        current.pause();
+        current._btn.textContent = '▶';
+        current._btn.classList.remove('playing');
+      }
+      if (!btn._audio) {
+        btn._audio = new Audio(btn.dataset.src);
+        btn._audio._btn = btn;
+        btn._audio.addEventListener('ended', function () {
+          btn.textContent = '▶';
+          btn.classList.remove('playing');
+          current = null;
+        });
+      }
+      if (btn._audio.paused) {
+        btn._audio.play();
+        btn.textContent = '⏸';
+        btn.classList.add('playing');
+        current = btn._audio;
+      } else {
+        btn._audio.pause();
+        btn.textContent = '▶';
+        btn.classList.remove('playing');
+        current = null;
+      }
+    });
+  }
+
+  document.querySelectorAll('.btn-play').forEach(initPlay);
+
+  document.querySelectorAll('.btn-regen').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if (btn.classList.contains('loading')) return;
+      var card = btn.closest('.speaker-card');
+      var playBtn = card ? card.querySelector('.btn-play') : null;
+
+      if (playBtn && playBtn._audio) {
+        playBtn._audio.pause();
+        playBtn._audio = null;
+        playBtn.textContent = '▶';
+        playBtn.classList.remove('playing');
+        if (current && current._btn === playBtn) current = null;
+      }
+
+      btn.classList.add('loading');
+      fetch(btn.dataset.regenUrl, {
+        method: 'POST',
+        headers: {'X-CSRFToken': csrfToken},
+      }).then(function (r) { return r.json(); }).then(function (data) {
+        btn.classList.remove('loading');
+        if (data.error) { alert('Regeneration failed: ' + data.error); return; }
+        if (playBtn) {
+          playBtn.style.display = '';
+          initPlay(playBtn);
+        }
+      }).catch(function () {
+        btn.classList.remove('loading');
+        alert('Regeneration failed.');
+      });
+    });
+  });
+  document.querySelectorAll('.btn-edit').forEach(function (btn) {
+    var slug = btn.dataset.slug;
+    var form = document.getElementById('form-' + slug);
+    var attrsDiv = document.getElementById('attrs-' + slug);
+
+    btn.addEventListener('click', function () {
+      attrsDiv.style.display = 'none';
+      btn.style.display = 'none';
+      form.style.display = 'block';
+    });
+
+    form.querySelector('.btn-cancel').addEventListener('click', function () {
+      form.style.display = 'none';
+      attrsDiv.style.display = '';
+      btn.style.display = '';
+    });
+
+    form.querySelector('.btn-save').addEventListener('click', function () {
+      var inputs = form.querySelectorAll('input');
+      var body = new FormData();
+      inputs.forEach(function (inp) { body.append(inp.name, inp.value); });
+      body.append('csrfmiddlewaretoken', csrfToken);
+
+      fetch(form.dataset.updateUrl, { method: 'POST', body: body })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.error) { alert('Save failed: ' + data.error); return; }
+          var sex = form.querySelector('[name=sex]').value.trim();
+          var age = form.querySelector('[name=age]').value.trim();
+          var nationality = form.querySelector('[name=nationality]').value.trim();
+          var aliases = form.querySelector('[name=aliases]').value.trim();
+          var traits = form.querySelector('[name=traits]').value.trim();
+          var text = [sex, age ? '· ' + age : '', nationality ? '· ' + nationality : ''].filter(Boolean).join(' ');
+          if (traits) text += (text ? '\n' : '') + traits;
+          if (aliases) text += (text ? '\n' : '') + 'also: ' + aliases;
+          attrsDiv.textContent = text;
+          form.style.display = 'none';
+          attrsDiv.style.display = '';
+          btn.style.display = '';
+        })
+        .catch(function () { alert('Save failed.'); });
+    });
+  });
+  function escHtml(str) {
+    return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function renderLines(lines) {
+    return lines.map(function(line) {
+      if (line.type === 'narrator') {
+        return '<p class="line narrator">' + escHtml(line.text) + '</p>';
+      } else if (line.type === 'dialogue') {
+        var mood = line.mood ? '<span class="mood-tag"> (' + escHtml(line.mood) + ')</span>' : '';
+        return '<p class="line dialogue"><span class="speaker-tag">' + escHtml(line.speaker) + '</span>' +
+               mood + '<span class="dialogue-text">' + escHtml(line.text) + '</span></p>';
+      } else {
+        return '<p class="line raw">' + escHtml(line.text) + '</p>';
+      }
+    }).join('');
+  }
+
+  function loadChapter(contentUrl, compileUrl, audioUrl) {
+    fetch(contentUrl)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var panel = document.querySelector('.panel-annotated');
+        var heading = panel.querySelector('h2');
+        panel.innerHTML = '';
+        panel.appendChild(heading);
+        panel.insertAdjacentHTML('beforeend', renderLines(data.lines));
+
+        var compileLink = document.getElementById('compile-link');
+        if (compileLink) compileLink.href = compileUrl;
+
+        var audioBar = document.getElementById('audio-bar');
+        var audioPlayer = document.getElementById('audio-player');
+        currentHasFullAudio = data.has_full_audio;
+        if (data.has_full_audio) {
+          audioPlayer.src = audioUrl;
+          audioBar.style.display = '';
+        } else {
+          audioBar.style.display = 'none';
+        }
+      });
+  }
+
+  document.querySelectorAll('.btn-chapter').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.btn-chapter').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      loadChapter(btn.dataset.contentUrl, btn.dataset.compileUrl, btn.dataset.audioUrl);
+    });
+  });
+
+  var chapterSelect = document.getElementById('chapter-select');
+  if (chapterSelect) {
+    chapterSelect.addEventListener('change', function() {
+      var opt = chapterSelect.options[chapterSelect.selectedIndex];
+      loadChapter(opt.dataset.contentUrl, opt.dataset.compileUrl, opt.dataset.audioUrl);
+    });
+  }
+})();
+</script>
+</body>
+</html>
