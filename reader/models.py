@@ -11,7 +11,7 @@ class ProcessedBook(models.Model):
 
     content_hash = models.CharField(max_length=64, unique=True)
     title = models.CharField(max_length=255)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True)
     output_path = models.CharField(max_length=500)
     error_message = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)

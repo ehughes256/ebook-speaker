@@ -244,3 +244,67 @@ def test_split_epub_chapters_toc_skips_short_entries():
     chapters = _run_epub_split(mock_book)
     assert len(chapters) == 1
     assert chapters[0]["title"] == "Chapter One"
+
+
+# --- Bounded untrusted input (FIX #15) ---
+
+from reader.ingestion import _parse_pdf, save_cover
+
+
+def _pdf_reader_with_pages(n_pages, text_per_page="x"):
+    """Build a mock PdfReader whose .pages is a list of n_pages extracting text."""
+    pages = []
+    for _ in range(n_pages):
+        page = MagicMock()
+        page.extract_text.return_value = text_per_page
+        pages.append(page)
+    reader = MagicMock()
+    reader.pages = pages
+    return reader
+
+
+def test_parse_pdf_truncates_when_over_max_pages(monkeypatch):
+    monkeypatch.setattr("reader.ingestion.MAX_PDF_PAGES", 3)
+    reader = _pdf_reader_with_pages(10, text_per_page="page")
+    with patch("reader.ingestion.pypdf.PdfReader", return_value=reader):
+        result = _parse_pdf(b"%PDF-fake")
+    # Only the first 3 pages should have been extracted/joined.
+    assert result.count("page") == 3
+    extracted = [p for p in reader.pages if p.extract_text.called]
+    assert len(extracted) == 3
+
+
+def test_parse_pdf_keeps_all_pages_under_limit(monkeypatch):
+    monkeypatch.setattr("reader.ingestion.MAX_PDF_PAGES", 100)
+    reader = _pdf_reader_with_pages(4, text_per_page="page")
+    with patch("reader.ingestion.pypdf.PdfReader", return_value=reader):
+        result = _parse_pdf(b"%PDF-fake")
+    assert result.count("page") == 4
+
+
+def test_parse_pdf_caps_total_characters(monkeypatch):
+    monkeypatch.setattr("reader.ingestion.MAX_PDF_PAGES", 1000)
+    monkeypatch.setattr("reader.ingestion.MAX_TEXT_CHARS", 50)
+    reader = _pdf_reader_with_pages(10, text_per_page="A" * 40)
+    with patch("reader.ingestion.pypdf.PdfReader", return_value=reader):
+        result = _parse_pdf(b"%PDF-fake")
+    # First page (40 chars) fits; second is truncated to 10, then we stop.
+    assert len(result.replace("\n", "")) <= 50
+
+
+def test_save_cover_rejects_non_image_bytes(tmp_path):
+    save_cover(tmp_path, b"<html>not an image</html>")
+    assert not (tmp_path / "cover").exists()
+
+
+def test_save_cover_accepts_png_header(tmp_path):
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    save_cover(tmp_path, png_bytes)
+    assert (tmp_path / "cover").exists()
+    assert (tmp_path / "cover").read_bytes() == png_bytes
+
+
+def test_save_cover_accepts_jpeg_header(tmp_path):
+    jpeg_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+    save_cover(tmp_path, jpeg_bytes)
+    assert (tmp_path / "cover").exists()

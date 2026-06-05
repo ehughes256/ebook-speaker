@@ -1,10 +1,49 @@
 import json
+import logging
+import re
 import shutil
 from pathlib import Path
 
 from django.conf import settings
 from django.http import FileResponse, Http404, HttpResponseBadRequest, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+
+logger = logging.getLogger(__name__)
+
+_CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_SLUG_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def validate_content_hash(content_hash):
+    """Reject anything that is not a 64-char lowercase hex SHA-256 (blocks path traversal)."""
+    if not _CONTENT_HASH_RE.match(content_hash):
+        raise Http404
+
+
+def validate_slug(slug):
+    """Reject anything outside the charset reader.tts.slugify_name produces (blocks path traversal)."""
+    if not _SLUG_RE.match(slug):
+        raise Http404
+
+
+def _assert_within_outputs(path):
+    """Defense-in-depth: ensure the resolved path stays inside OUTPUTS_DIR."""
+    base = Path(settings.OUTPUTS_DIR).resolve()
+    resolved = Path(path).resolve()
+    if not resolved.is_relative_to(base):
+        raise Http404
+
+
+def book_output_dir(content_hash):
+    return Path(settings.OUTPUTS_DIR) / content_hash
+
+
+def load_chapters(out_dir):
+    """Return the parsed chapters.json list, or None if absent."""
+    chapters_path = out_dir / "chapters.json"
+    if not chapters_path.exists():
+        return None
+    return json.loads(chapters_path.read_text(encoding="utf-8"))
 
 from reader.ingestion import (
     compute_hash, normalize_input, split_text_chapters, split_epub_chapters,
@@ -23,7 +62,9 @@ def upload_view(request):
 
 
 def cover_view(request, content_hash):
-    cover_path = Path(settings.OUTPUTS_DIR) / content_hash / "cover"
+    validate_content_hash(content_hash)
+    cover_path = book_output_dir(content_hash) / "cover"
+    _assert_within_outputs(cover_path)
     if not cover_path.exists():
         raise Http404
     header = cover_path.read_bytes()[:4]
@@ -35,10 +76,9 @@ def listen_list_view(request):
     books = ProcessedBook.objects.filter(status="done").order_by("-created_at")
     available = []
     for book in books:
-        out_dir = Path(settings.OUTPUTS_DIR) / book.content_hash
-        chapters_path = out_dir / "chapters.json"
-        if chapters_path.exists():
-            chapters_meta = json.loads(chapters_path.read_text(encoding="utf-8"))
+        out_dir = book_output_dir(book.content_hash)
+        chapters_meta = load_chapters(out_dir)
+        if chapters_meta is not None:
             n = len(chapters_meta)
             audio_count = sum(
                 1 for i in range(1, n + 1)
@@ -53,12 +93,12 @@ def listen_list_view(request):
 
 
 def listen_book_view(request, content_hash):
+    validate_content_hash(content_hash)
     book = get_object_or_404(ProcessedBook, content_hash=content_hash, status="done")
-    out_dir = Path(settings.OUTPUTS_DIR) / content_hash
-    chapters_path = out_dir / "chapters.json"
+    out_dir = book_output_dir(content_hash)
+    chapters_meta = load_chapters(out_dir)
 
-    if chapters_path.exists():
-        chapters_meta = json.loads(chapters_path.read_text(encoding="utf-8"))
+    if chapters_meta is not None:
         n = len(chapters_meta)
         chapters = []
         for ch in chapters_meta:
@@ -97,6 +137,12 @@ def process_view(request):
 
     if input_text and input_file:
         return HttpResponseBadRequest("Provide text or a file, not both")
+
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    if input_file and input_file.size > max_bytes:
+        return HttpResponseBadRequest(f"File too large (max {settings.MAX_UPLOAD_MB} MB)")
+    if input_text and len(input_text) > max_bytes:
+        return HttpResponseBadRequest(f"Text too large (max {settings.MAX_UPLOAD_MB} MB)")
 
     try:
         if input_file:
@@ -160,10 +206,9 @@ def process_view(request):
 
 def _has_incomplete_chapters(out_dir: Path) -> bool:
     """Return True if a chapter book is missing any annotated.txt files."""
-    chapters_path = out_dir / "chapters.json"
-    if not chapters_path.exists():
+    chapters_meta = load_chapters(out_dir)
+    if chapters_meta is None:
         return not (out_dir / "annotated.txt").exists()
-    chapters_meta = json.loads(chapters_path.read_text(encoding="utf-8"))
     n = len(chapters_meta)
     pad = max(2, len(str(n)))
     return any(
@@ -173,17 +218,17 @@ def _has_incomplete_chapters(out_dir: Path) -> bool:
 
 
 def progress_view(request, content_hash):
+    validate_content_hash(content_hash)
     book = get_object_or_404(ProcessedBook, content_hash=content_hash)
     return render(request, "reader/progress.html", {"book": book})
 
 
 def stream_view(request, content_hash):
-    import logging as _log
-    _slog = _log.getLogger(__name__)
-    _slog.info("stream_view called for %s", content_hash)
+    validate_content_hash(content_hash)
+    logger.debug("stream_view called for %s", content_hash)
 
     book = get_object_or_404(ProcessedBook, content_hash=content_hash)
-    _slog.info("stream_view book status=%s for %s", book.status, content_hash)
+    logger.debug("stream_view book status=%s for %s", book.status, content_hash)
 
     if book.status == "done":
         def _done():
@@ -193,36 +238,56 @@ def stream_view(request, content_hash):
         resp["X-Accel-Buffering"] = "no"
         return resp
 
-    book.status = "processing"
-    book.save(update_fields=["status", "updated_at"])
-    _slog.info("stream_view status saved for %s", content_hash)
+    # Atomically claim the book so two concurrent requests can't both run the pipeline.
+    claimed = ProcessedBook.objects.filter(
+        content_hash=content_hash, status__in=["pending", "failed"]
+    ).update(status="processing")
+    if claimed == 0:
+        logger.debug("stream_view could not claim %s (already processing)", content_hash)
 
-    out_dir = Path(settings.OUTPUTS_DIR) / content_hash
+        def _busy():
+            yield "data: error Another process is already handling this book.\n\n"
+        resp = StreamingHttpResponse(_busy(), content_type="text/event-stream")
+        resp["Cache-Control"] = "no-cache"
+        resp["X-Accel-Buffering"] = "no"
+        return resp
+    logger.debug("stream_view status saved for %s", content_hash)
+
+    out_dir = book_output_dir(content_hash)
     raw_path = out_dir / "raw.txt"
     text = raw_path.read_text(encoding="utf-8") if raw_path.exists() else ""
-    chapters_path = out_dir / "chapters.json"
+    chapters_meta = load_chapters(out_dir)
 
-    if chapters_path.exists():
-        chapters_meta = json.loads(chapters_path.read_text(encoding="utf-8"))
-        _slog.info("stream_view routing to run_book_pipeline, %d chapters for %s", len(chapters_meta), content_hash)
+    if chapters_meta is not None:
+        logger.debug("stream_view routing to run_book_pipeline, %d chapters for %s", len(chapters_meta), content_hash)
         pipeline_gen = run_book_pipeline(content_hash, chapters_meta, book.title)
     else:
-        _slog.info("stream_view routing to run_pipeline for %s", content_hash)
+        logger.debug("stream_view routing to run_pipeline for %s", content_hash)
         pipeline_gen = run_pipeline(content_hash, text, book.title)
 
     def _event_stream():
-        _slog.info("stream_view _event_stream generator started for %s", content_hash)
+        logger.debug("stream_view _event_stream generator started for %s", content_hash)
         from django.db import close_old_connections
         close_old_connections()
-        _slog.info("stream_view connections closed, beginning pipeline for %s", content_hash)
+        logger.debug("stream_view connections closed, beginning pipeline for %s", content_hash)
         success = True
-        for event in pipeline_gen:
-            yield event
-            if "error" in event:
-                success = False
-        ProcessedBook.objects.filter(content_hash=content_hash).update(
-            status="done" if success else "failed"
-        )
+        error_message = ""
+        try:
+            for event in pipeline_gen:
+                yield event
+                if event.startswith("data: error"):
+                    success = False
+                    error_message = event[len("data: error"):].strip()
+        except Exception as exc:
+            success = False
+            error_message = str(exc)
+            logger.exception("stream_view pipeline raised for %s", content_hash)
+            yield f"data: error {exc}\n\n"
+        update_fields = {"status": "done" if success else "failed"}
+        if not success:
+            # error_message is a TextField; guard against absurdly long values.
+            update_fields["error_message"] = error_message[:5000]
+        ProcessedBook.objects.filter(content_hash=content_hash).update(**update_fields)
 
     resp = StreamingHttpResponse(_event_stream(), content_type="text/event-stream")
     resp["Cache-Control"] = "no-cache"
@@ -233,9 +298,10 @@ def stream_view(request, content_hash):
 def delete_view(request, content_hash):
     if request.method != "POST":
         return HttpResponseBadRequest("POST required")
+    validate_content_hash(content_hash)
     book = get_object_or_404(ProcessedBook, content_hash=content_hash)
     book.delete()
-    out_dir = Path(settings.OUTPUTS_DIR) / content_hash
+    out_dir = book_output_dir(content_hash)
     if out_dir.exists():
         shutil.rmtree(out_dir)
     return redirect("reader:upload")
@@ -244,8 +310,10 @@ def delete_view(request, content_hash):
 def update_speaker_view(request, content_hash, slug):
     if request.method != "POST":
         return HttpResponseBadRequest("POST required")
+    validate_content_hash(content_hash)
+    validate_slug(slug)
     get_object_or_404(ProcessedBook, content_hash=content_hash, status="done")
-    out_dir = Path(settings.OUTPUTS_DIR) / content_hash
+    out_dir = book_output_dir(content_hash)
     sex = request.POST.get("sex", "").strip()
     age = request.POST.get("age", "").strip()
     nationality = request.POST.get("nationality", "").strip()
@@ -258,28 +326,29 @@ def update_speaker_view(request, content_hash, slug):
 
 
 def full_audio_view(request, content_hash, chapter=None):
+    validate_content_hash(content_hash)
     get_object_or_404(ProcessedBook, content_hash=content_hash, status="done")
-    out_dir = Path(settings.OUTPUTS_DIR) / content_hash
+    out_dir = book_output_dir(content_hash)
     if chapter is not None:
-        chapters_path = out_dir / "chapters.json"
-        if not chapters_path.exists():
+        chapters_meta = load_chapters(out_dir)
+        if chapters_meta is None:
             raise Http404
-        chapters_meta = json.loads(chapters_path.read_text(encoding="utf-8"))
         mp3_path = chapter_dir_path(out_dir, chapter, len(chapters_meta)) / "compiled" / "full.mp3"
     else:
         mp3_path = out_dir / "compiled" / "full.mp3"
+    _assert_within_outputs(mp3_path)
     if not mp3_path.exists():
         raise Http404
     return FileResponse(mp3_path.open("rb"), content_type="audio/mpeg")
 
 
 def chapter_content_view(request, content_hash, chapter):
+    validate_content_hash(content_hash)
     get_object_or_404(ProcessedBook, content_hash=content_hash, status="done")
-    out_dir = Path(settings.OUTPUTS_DIR) / content_hash
-    chapters_path = out_dir / "chapters.json"
-    if not chapters_path.exists():
+    out_dir = book_output_dir(content_hash)
+    chapters_meta = load_chapters(out_dir)
+    if chapters_meta is None:
         raise Http404
-    chapters_meta = json.loads(chapters_path.read_text(encoding="utf-8"))
     if chapter < 1 or chapter > len(chapters_meta):
         raise Http404
     chapter_dir = chapter_dir_path(out_dir, chapter, len(chapters_meta))
@@ -294,12 +363,12 @@ def chapter_content_view(request, content_hash, chapter):
 
 
 def compile_all_view(request, content_hash):
+    validate_content_hash(content_hash)
     book = get_object_or_404(ProcessedBook, content_hash=content_hash, status="done")
-    out_dir = Path(settings.OUTPUTS_DIR) / content_hash
-    chapters_path = out_dir / "chapters.json"
+    out_dir = book_output_dir(content_hash)
+    chapters_meta = load_chapters(out_dir)
 
-    if chapters_path.exists():
-        chapters_meta = json.loads(chapters_path.read_text(encoding="utf-8"))
+    if chapters_meta is not None:
         n = len(chapters_meta)
         missing = []
         for ch in chapters_meta:
@@ -324,15 +393,15 @@ def compile_all_view(request, content_hash):
 
 
 def compile_view(request, content_hash, chapter=None):
+    validate_content_hash(content_hash)
     book = get_object_or_404(ProcessedBook, content_hash=content_hash, status="done")
     chapter_title = None
     if chapter is not None:
-        out_dir = Path(settings.OUTPUTS_DIR) / content_hash
-        chapters_path = out_dir / "chapters.json"
-        if not chapters_path.exists():
+        out_dir = book_output_dir(content_hash)
+        if not (out_dir / "chapters.json").exists():
             raise Http404
         try:
-            meta = json.loads(chapters_path.read_text(encoding="utf-8"))
+            meta = load_chapters(out_dir)
             match = next((c for c in meta if c["index"] == chapter), None)
             if match:
                 chapter_title = match["title"]
@@ -342,6 +411,7 @@ def compile_view(request, content_hash, chapter=None):
 
 
 def compile_stream_view(request, content_hash, chapter=None):
+    validate_content_hash(content_hash)
     get_object_or_404(ProcessedBook, content_hash=content_hash, status="done")
     from reader.compile import run_compile
 
@@ -354,8 +424,11 @@ def compile_stream_view(request, content_hash, chapter=None):
 
 
 def voice_view(request, content_hash, slug):
-    out_dir = Path(settings.OUTPUTS_DIR) / content_hash
+    validate_content_hash(content_hash)
+    validate_slug(slug)
+    out_dir = book_output_dir(content_hash)
     wav_path = out_dir / "voices" / f"{slug}.wav"
+    _assert_within_outputs(wav_path)
     if not wav_path.exists():
         raise Http404
     return FileResponse(wav_path.open("rb"), content_type="audio/wav")
@@ -364,7 +437,9 @@ def voice_view(request, content_hash, slug):
 def regenerate_voice_view(request, content_hash, slug):
     if request.method != "POST":
         return HttpResponseBadRequest("POST required")
-    out_dir = Path(settings.OUTPUTS_DIR) / content_hash
+    validate_content_hash(content_hash)
+    validate_slug(slug)
+    out_dir = book_output_dir(content_hash)
     speakers = read_speakers(out_dir)
     speaker = next((s for s in speakers if slugify_name(s["name"]) == slug), None)
     if speaker is None:
@@ -379,17 +454,17 @@ def regenerate_voice_view(request, content_hash, slug):
 
 
 def results_view(request, content_hash):
+    validate_content_hash(content_hash)
     book = get_object_or_404(ProcessedBook, content_hash=content_hash, status="done")
-    out_dir = Path(settings.OUTPUTS_DIR) / content_hash
+    out_dir = book_output_dir(content_hash)
     speakers = read_speakers(out_dir)
     for speaker in speakers:
         slug = slugify_name(speaker["name"])
         speaker["slug"] = slug
         speaker["has_voice"] = (out_dir / "voices" / f"{slug}.wav").exists()
 
-    chapters_path = out_dir / "chapters.json"
-    if chapters_path.exists():
-        chapters_meta = json.loads(chapters_path.read_text(encoding="utf-8"))
+    chapters_meta = load_chapters(out_dir)
+    if chapters_meta is not None:
         n = len(chapters_meta)
         first_chapter_dir = chapter_dir_path(out_dir, 1, n)
         annotated_path = first_chapter_dir / "annotated.txt"

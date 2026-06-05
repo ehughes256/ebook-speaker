@@ -1,5 +1,6 @@
 import logging
 import re
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,8 @@ def _sanitise_age(age: str) -> str:
 
 _model = None
 _chatterbox_model = None
+_model_lock = threading.Lock()
+_chatterbox_model_lock = threading.Lock()
 
 SAMPLE_TEXT = (
     "That quick beige fox jumped in the air over each thin dog. Look out, I shout, for he's foiled you again, creating chaos."
@@ -72,13 +75,19 @@ def slugify_name(name: str) -> str:
     return s.strip("_")
 
 
-def build_instruct(speaker: dict) -> str:
+def _speaker_attributes(speaker: dict):
+    """Return (sex, age, nationality, traits) normalized exactly as the builders need."""
     sex = speaker.get("sex", "unknown")
     age = speaker.get("age", "unknown")
     if age and age != "unknown":
         age = _normalize_age(age) if re.fullmatch(r"\d+", age.strip()) else _sanitise_age(age)
     traits = _normalize_traits(speaker.get("traits", ""))
     nationality = speaker.get("nationality", "")
+    return sex, age, nationality, traits
+
+
+def build_instruct(speaker: dict) -> str:
+    sex, age, nationality, traits = _speaker_attributes(speaker)
 
     has_attrs = any([
         sex and sex != "unknown",
@@ -115,14 +124,16 @@ def build_instruct(speaker: dict) -> str:
 def get_tts_model():
     global _model
     if _model is None:
-        import torch
-        from qwen_tts import Qwen3TTSModel
-        _model = Qwen3TTSModel.from_pretrained(
-            "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-            device_map="cuda:0",
-            dtype=torch.bfloat16,
-            attn_implementation="eager",
-        )
+        with _model_lock:
+            if _model is None:
+                import torch
+                from qwen_tts import Qwen3TTSModel
+                _model = Qwen3TTSModel.from_pretrained(
+                    "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+                    device_map="cuda:0",
+                    dtype=torch.bfloat16,
+                    attn_implementation="eager",
+                )
     return _model
 
 
@@ -153,8 +164,10 @@ def _split_text(text: str) -> list[str]:
 def get_chatterbox_model():
     global _chatterbox_model
     if _chatterbox_model is None:
-        from chatterbox.tts import ChatterboxTTS
-        _chatterbox_model = ChatterboxTTS.from_pretrained(device="cuda")
+        with _chatterbox_model_lock:
+            if _chatterbox_model is None:
+                from chatterbox.tts import ChatterboxTTS
+                _chatterbox_model = ChatterboxTTS.from_pretrained(device="cuda")
     return _chatterbox_model
 
 
@@ -182,12 +195,7 @@ def build_elevenlabs_description(speaker: dict) -> str:
             "A neutral, clear, authoritative narrator. "
             "Measured pace, calm and composed. Clear diction, professional tone."
         )
-    sex = speaker.get("sex", "unknown")
-    age = speaker.get("age", "unknown")
-    if age and age != "unknown":
-        age = _normalize_age(age) if re.fullmatch(r"\d+", age.strip()) else _sanitise_age(age)
-    nationality = speaker.get("nationality", "")
-    traits = _normalize_traits(speaker.get("traits", ""))
+    sex, age, nationality, traits = _speaker_attributes(speaker)
 
     if age != "unknown" and sex != "unknown":
         desc = f"A {age} {sex} voice"

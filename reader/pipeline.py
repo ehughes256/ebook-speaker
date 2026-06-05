@@ -8,6 +8,37 @@ from reader.tts import generate_voice_sample, get_tts_model, slugify_name
 logger = logging.getLogger(__name__)
 
 
+def _generate_voices(narrator_entry, speakers, voices_dir):
+    """Yield SSE strings for Pass 3: build the skip-list, load the TTS model, and
+    generate a voice per speaker that lacks a WAV. Identical in both pipelines."""
+    speakers_for_tts = []
+    if not (voices_dir / "narrator.wav").exists():
+        speakers_for_tts.append(narrator_entry)
+    for speaker in speakers:
+        slug = slugify_name(speaker["name"])
+        if not (voices_dir / f"{slug}.wav").exists():
+            speakers_for_tts.append(speaker)
+
+    if speakers_for_tts:
+        try:
+            get_tts_model()
+            yield "data: voices_start\n\n"
+            total_voices = len(speakers_for_tts)
+            for i, speaker in enumerate(speakers_for_tts, start=1):
+                try:
+                    logger.info("Generating voice for %s", speaker["name"])
+                    generate_voice_sample(speaker, voices_dir)
+                except Exception as exc:
+                    logger.exception("Failed to generate voice for %s", speaker["name"])
+                    yield f"data: voice_warning Failed voice for {speaker['name']}: {exc}\n\n"
+                yield f"data: voice_progress {i} {total_voices}\n\n"
+        except Exception as exc:
+            logger.exception("Voice generation unavailable")
+            yield f"data: voice_warning Voice generation unavailable: {exc}\n\n"
+    else:
+        logger.info("All voices already exist, skipping Pass 3")
+
+
 def run_pipeline(content_hash: str, text: str, title: str):
     """Generator that runs the three-pass pipeline and yields SSE event strings."""
     try:
@@ -38,14 +69,23 @@ def run_pipeline(content_hash: str, text: str, title: str):
             # Pass 1: extract speakers from each chunk
             per_chunk_speakers = []
             for chunk in chunks:
-                speakers = extract_speakers(chunk)
+                try:
+                    speakers = extract_speakers(chunk)
+                except Exception:
+                    logger.exception("extract_speakers failed for a chunk — treating as no speakers")
+                    speakers = []
                 per_chunk_speakers.append(speakers)
             merged_speakers = merge_speakers(per_chunk_speakers)
 
             # Pass 2: annotate each chunk
             annotated_chunks = []
             for i, chunk in enumerate(chunks, start=1):
-                annotated = annotate_chunk(chunk, merged_speakers, chunk_index=i)
+                try:
+                    annotated = annotate_chunk(chunk, merged_speakers, chunk_index=i)
+                except Exception as exc:
+                    logger.exception("annotate_chunk failed for chunk %d — falling back to raw narration", i)
+                    yield f"data: warning Annotation failed for chunk {i}: {exc}\n\n"
+                    annotated = f"[NARRATOR] {chunk['content']}"
                 annotated_chunks.append(annotated)
                 yield f"data: chunk_progress {i} {total}\n\n"
 
@@ -54,33 +94,7 @@ def run_pipeline(content_hash: str, text: str, title: str):
             write_annotated(annotated_chunks, out_dir)
 
         # Pass 3: generate voices, skipping any that already exist
-        speakers_for_tts = []
-        if not (voices_dir / "narrator.wav").exists():
-            speakers_for_tts.append(narrator_entry)
-        for speaker in merged_speakers:
-            slug = slugify_name(speaker["name"])
-            if not (voices_dir / f"{slug}.wav").exists():
-                speakers_for_tts.append(speaker)
-
-        if speakers_for_tts:
-            try:
-                get_tts_model()
-                yield "data: voices_start\n\n"
-                total_voices = len(speakers_for_tts)
-                for i, speaker in enumerate(speakers_for_tts, start=1):
-                    try:
-                        logger.info("Generating voice for %s | %s", speaker["name"], speaker)
-                        generate_voice_sample(speaker, voices_dir)
-                        logger.info("Voice generated successfully for %s", speaker["name"])
-                    except Exception as exc:
-                        logger.exception("Failed to generate voice for %s", speaker["name"])
-                        yield f"data: voice_warning Failed voice for {speaker['name']}: {exc}\n\n"
-                    yield f"data: voice_progress {i} {total_voices}\n\n"
-            except Exception as exc:
-                logger.exception("Voice generation unavailable")
-                yield f"data: voice_warning Voice generation unavailable: {exc}\n\n"
-        else:
-            logger.info("All voices already exist, skipping Pass 3")
+        yield from _generate_voices(narrator_entry, merged_speakers, voices_dir)
 
         yield "data: done\n\n"
 
@@ -154,7 +168,11 @@ def run_book_pipeline(content_hash: str, chapters: list[dict], title: str):
                 per_chunk_speakers = []
                 for ci, chunk in enumerate(chunks, start=1):
                     logger.info("run_book_pipeline chapter %d Pass 1: extract_speakers chunk %d/%d", i, ci, chapter_total)
-                    speakers = extract_speakers(chunk, known_speakers=known_speakers)
+                    try:
+                        speakers = extract_speakers(chunk, known_speakers=known_speakers)
+                    except Exception:
+                        logger.exception("run_book_pipeline chapter %d Pass 1: extract_speakers chunk %d/%d failed — treating as no speakers", i, ci, chapter_total)
+                        speakers = []
                     logger.info("run_book_pipeline chapter %d Pass 1: chunk %d/%d done, found %d speakers", i, ci, chapter_total, len(speakers))
                     per_chunk_speakers.append(speakers)
 
@@ -170,16 +188,20 @@ def run_book_pipeline(content_hash: str, chapters: list[dict], title: str):
                 # Pass 2: annotate chapter with full cumulative speaker list
                 annotated_chunks = []
                 for j, chunk in enumerate(chunks, start=1):
-                    annotated = annotate_chunk(chunk, known_speakers, chunk_index=j)
+                    try:
+                        annotated = annotate_chunk(chunk, known_speakers, chunk_index=j)
+                    except Exception as exc:
+                        logger.exception("run_book_pipeline chapter %d Pass 2: annotate_chunk %d/%d failed — falling back to raw narration", i, j, chapter_total)
+                        yield f"data: warning Annotation failed for chapter {i} chunk {j}: {exc}\n\n"
+                        annotated = f"[NARRATOR] {chunk['content']}"
                     annotated_chunks.append(annotated)
                     yield f"data: chunk_progress {j} {chapter_total}\n\n"
 
                 annotated_chunks = normalize_speaker_names(annotated_chunks, known_speakers)
                 write_annotated(annotated_chunks, chapter_dir)
-                ann_path = chapter_dir / "annotated.txt"
-                if ann_path.exists():
+                if annotated_path.exists():
                     raw_bytes = len(chapter_text.encode())
-                    ann_bytes = ann_path.stat().st_size
+                    ann_bytes = annotated_path.stat().st_size
                     if ann_bytes < raw_bytes:
                         logger.warning(
                             "Chapter %d annotated.txt (%d bytes) is smaller than raw.txt (%d bytes) "
@@ -188,32 +210,7 @@ def run_book_pipeline(content_hash: str, chapters: list[dict], title: str):
                         )
 
             # Pass 3: generate voices only for speakers without an existing WAV
-            speakers_for_tts = []
-            if not (voices_dir / "narrator.wav").exists():
-                speakers_for_tts.append(narrator_entry)
-            for speaker in known_speakers:
-                slug = slugify_name(speaker["name"])
-                if not (voices_dir / f"{slug}.wav").exists():
-                    speakers_for_tts.append(speaker)
-
-            if speakers_for_tts:
-                try:
-                    get_tts_model()
-                    yield "data: voices_start\n\n"
-                    total_voices = len(speakers_for_tts)
-                    for k, speaker in enumerate(speakers_for_tts, start=1):
-                        try:
-                            logger.info("Generating voice for %s", speaker["name"])
-                            generate_voice_sample(speaker, voices_dir)
-                        except Exception as exc:
-                            logger.exception("Failed to generate voice for %s", speaker["name"])
-                            yield f"data: voice_warning Failed voice for {speaker['name']}: {exc}\n\n"
-                        yield f"data: voice_progress {k} {total_voices}\n\n"
-                except Exception as exc:
-                    logger.exception("Voice generation unavailable")
-                    yield f"data: voice_warning Voice generation unavailable: {exc}\n\n"
-            else:
-                logger.info("Chapter %d: all voices already exist, skipping Pass 3", i)
+            yield from _generate_voices(narrator_entry, known_speakers, voices_dir)
 
             yield f"data: chapter_done {i} {total_chapters}\n\n"
 

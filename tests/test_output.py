@@ -116,3 +116,57 @@ def test_write_speakers_preserves_narrator_attributes(tmp_path, settings):
     assert narrator["sex"] == "female"
     assert narrator["age"] == "elderly"
     assert narrator.get("traits") == "wise"
+
+
+def test_speakers_round_trip_with_special_chars(tmp_path, settings):
+    settings.OUTPUTS_DIR = tmp_path
+    out_dir = ensure_output_dir("abc123")
+    speaker = {
+        "name": "O'Brien, the | Great",
+        "aliases": ["Jack | Comma, Pipe", "Line\nBreak"],
+        "sex": "male",
+        "age": "middle-aged",
+        "traits": "sly, cunning | devious\nmulti-line",
+    }
+    write_speakers([speaker], out_dir)
+    result = read_speakers(out_dir)
+    restored = next(s for s in result if s["name"] != "NARRATOR")
+    assert restored["name"] == "O'Brien, the | Great"
+    assert restored["aliases"] == ["Jack | Comma, Pipe", "Line\nBreak"]
+    assert restored["traits"] == "sly, cunning | devious\nmulti-line"
+
+
+def test_speakers_round_trip_with_backslash(tmp_path, settings):
+    settings.OUTPUTS_DIR = tmp_path
+    out_dir = ensure_output_dir("abc123")
+    speaker = {"name": "Back\\slash", "sex": "unknown", "age": "unknown", "traits": "path\\like"}
+    write_speakers([speaker], out_dir)
+    restored = next(s for s in read_speakers(out_dir) if s["name"] != "NARRATOR")
+    assert restored["name"] == "Back\\slash"
+    assert restored["traits"] == "path\\like"
+
+
+def test_parse_annotated_line_dialogue_after_dotall_removal():
+    # A normal single-line dialogue tag must still parse correctly without re.DOTALL.
+    line = '[ALICE | mood=nervous] "Hello there, friend."'
+    result = parse_annotated_line(line)
+    assert result["type"] == "dialogue"
+    assert result["speaker"] == "ALICE"
+    assert result["mood"] == "nervous"
+    assert result["text"] == '"Hello there, friend."'
+
+
+def test_write_speakers_leaves_no_tmp_files(tmp_path, settings):
+    settings.OUTPUTS_DIR = tmp_path
+    out_dir = ensure_output_dir("abc123")
+    write_speakers(SPEAKERS, out_dir)
+    leftovers = list(out_dir.glob("*.tmp")) + list(out_dir.glob("speakers.txt.*"))
+    assert leftovers == []
+
+
+def test_write_annotated_leaves_no_tmp_files(tmp_path, settings):
+    settings.OUTPUTS_DIR = tmp_path
+    out_dir = ensure_output_dir("abc123")
+    write_annotated(ANNOTATED_CHUNKS, out_dir)
+    leftovers = list(out_dir.glob("*.tmp")) + list(out_dir.glob("annotated.txt.*"))
+    assert leftovers == []

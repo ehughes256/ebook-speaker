@@ -1,17 +1,38 @@
 import hashlib
 import io
 import json
+import logging
 import os
 import re as _re
 import tempfile
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 import pypdf
 from bs4 import BeautifulSoup
 from ebooklib import epub
 import ebooklib
+
+logger = logging.getLogger(__name__)
+
+# Bounds on untrusted uploaded/fetched content.
+MAX_PDF_PAGES = 5000
+MAX_TEXT_CHARS = 20_000_000
+MAX_COVER_BYTES = 10 * 1024 * 1024
+
+
+@contextmanager
+def _read_epub_from_bytes(file_bytes):
+    """Write EPUB bytes to a temp file, yield the parsed ebooklib book, always clean up."""
+    with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as f:
+        f.write(file_bytes)
+        tmp_path = f.name
+    try:
+        yield epub.read_epub(tmp_path)
+    finally:
+        os.unlink(tmp_path)
 
 
 def compute_hash(text: str) -> str:
@@ -55,34 +76,50 @@ def normalize_input(
 
 def _parse_pdf(file_bytes: bytes) -> str:
     reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-    pages = [page.extract_text() or "" for page in reader.pages]
+    total_pages = len(reader.pages)
+    if total_pages > MAX_PDF_PAGES:
+        logger.warning(
+            "PDF has %d pages; truncating to %d", total_pages, MAX_PDF_PAGES
+        )
+
+    pages = []
+    char_count = 0
+    truncated_chars = False
+    for page in reader.pages[:MAX_PDF_PAGES]:
+        text = page.extract_text() or ""
+        if char_count + len(text) > MAX_TEXT_CHARS:
+            pages.append(text[: MAX_TEXT_CHARS - char_count])
+            truncated_chars = True
+            break
+        pages.append(text)
+        char_count += len(text)
+
+    if truncated_chars:
+        logger.warning(
+            "PDF text exceeded %d chars; truncating", MAX_TEXT_CHARS
+        )
     return "\n\n".join(pages)
 
 
 def extract_epub_cover(file_bytes: bytes) -> bytes | None:
     """Extract the cover image from an EPUB file. Returns raw image bytes or None."""
-    with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as f:
-        f.write(file_bytes)
-        tmp_path = f.name
     try:
-        book = epub.read_epub(tmp_path)
-        # Try metadata cover reference first
-        cover_meta = book.get_metadata("OPF", "cover")
-        if cover_meta:
-            cover_id = cover_meta[0][1].get("content", "")
-            for item in book.get_items():
-                if item.id == cover_id and item.media_type.startswith("image/"):
+        with _read_epub_from_bytes(file_bytes) as book:
+            # Try metadata cover reference first
+            cover_meta = book.get_metadata("OPF", "cover")
+            if cover_meta:
+                cover_id = cover_meta[0][1].get("content", "")
+                for item in book.get_items():
+                    if item.id == cover_id and item.media_type.startswith("image/"):
+                        return item.get_content()
+            # Fall back to any image named "cover"
+            for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
+                name = (item.get_name() or "").lower()
+                if "cover" in name:
                     return item.get_content()
-        # Fall back to any image named "cover"
-        for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
-            name = (item.get_name() or "").lower()
-            if "cover" in name:
-                return item.get_content()
-        return None
+            return None
     except Exception:
         return None
-    finally:
-        os.unlink(tmp_path)
 
 
 def fetch_openlibrary_cover(title: str) -> bytes | None:
@@ -99,13 +136,29 @@ def fetch_openlibrary_cover(title: str) -> bytes | None:
         with urllib.request.urlopen(
             f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg", timeout=5
         ) as resp:
-            return resp.read()
+            return resp.read(MAX_COVER_BYTES)
     except Exception:
         return None
 
 
+def _looks_like_image(image_bytes: bytes) -> bool:
+    """Cheap magic-number check for PNG, JPEG, or GIF."""
+    return (
+        image_bytes.startswith(b"\x89PNG")
+        or image_bytes.startswith(b"\xff\xd8\xff")
+        or image_bytes.startswith(b"GIF8")
+    )
+
+
 def save_cover(out_dir: Path, image_bytes: bytes) -> None:
-    """Save cover image bytes to out_dir/cover, detecting JPEG or PNG."""
+    """Save cover image bytes to out_dir/cover, detecting JPEG or PNG.
+
+    Validates the bytes look like a real image first; non-image data is
+    logged and discarded rather than written.
+    """
+    if not _looks_like_image(image_bytes):
+        logger.warning("Cover bytes do not look like a PNG/JPEG/GIF image; not saving")
+        return
     (out_dir / "cover").write_bytes(image_bytes)
 
 
@@ -134,12 +187,7 @@ def split_text_chapters(text: str) -> list[dict] | None:
 
 def split_epub_chapters(file_bytes: bytes) -> list[dict]:
     """Split an EPUB into chapters. Uses the TOC for titles; falls back to spine merging."""
-    with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as f:
-        f.write(file_bytes)
-        tmp_path = f.name
-    try:
-        book = epub.read_epub(tmp_path)
-
+    with _read_epub_from_bytes(file_bytes) as book:
         # Build a map: document basename → plain text
         doc_by_name: dict[str, str] = {}
         ordered_texts: list[str] = []
@@ -151,19 +199,17 @@ def split_epub_chapters(file_bytes: bytes) -> list[dict]:
                 doc_by_name[key] = text
             if text:
                 ordered_texts.append(text)
-    finally:
-        os.unlink(tmp_path)
 
-    if not ordered_texts:
-        return []
+        if not ordered_texts:
+            return []
 
-    # Primary: use the epub's Table of Contents for accurate titles
-    chapters = _epub_chapters_from_toc(book.toc, doc_by_name)
-    if chapters:
-        return chapters
+        # Primary: use the epub's Table of Contents for accurate titles
+        chapters = _epub_chapters_from_toc(book.toc, doc_by_name)
+        if chapters:
+            return chapters
 
-    # Fallback: merge spine documents by word count
-    return _epub_chapters_from_spine(ordered_texts)
+        # Fallback: merge spine documents by word count
+        return _epub_chapters_from_spine(ordered_texts)
 
 
 def _epub_chapters_from_toc(toc, doc_by_name: dict) -> list[dict]:
@@ -224,15 +270,9 @@ def _epub_chapters_from_spine(texts: list[str]) -> list[dict]:
 
 
 def _parse_epub(file_bytes: bytes) -> str:
-    with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as f:
-        f.write(file_bytes)
-        tmp_path = f.name
-    try:
-        book = epub.read_epub(tmp_path)
+    with _read_epub_from_bytes(file_bytes) as book:
         texts = []
         for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
             soup = BeautifulSoup(item.get_content(), "html.parser")
             texts.append(soup.get_text())
         return "\n\n".join(texts)
-    finally:
-        os.unlink(tmp_path)

@@ -3,10 +3,21 @@ import pytest
 import soundfile as sf
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
-from reader.compile import run_compile, _convert_batch, _convert_to_mp3, _parse_segments, _split_mixed_segment, _has_mixed_content
+from reader.compile import run_compile, _convert_batch, _convert_to_mp3, _parse_segments, _split_mixed_segment, _has_mixed_content, _concat_list_entry, _concatenate_mp3s
 
 
 CONTENT_HASH = "abc123"
+
+
+@pytest.fixture(autouse=True)
+def _ffmpeg_on_path():
+    """Default: pretend ffmpeg is installed so the run_compile preflight passes.
+
+    Tests that exercise the missing-ffmpeg path patch shutil.which themselves,
+    which overrides this fixture's patch within their own ``with`` block.
+    """
+    with patch("reader.compile.shutil.which", return_value="/usr/bin/ffmpeg"):
+        yield
 
 
 def _setup_output_dir(tmp_path, n_extra_lines=0):
@@ -263,3 +274,65 @@ def test_convert_batch_continues_on_individual_failure(tmp_path):
     wav2.write_bytes(b"fake")
     with patch("reader.compile._convert_to_mp3", side_effect=RuntimeError("ffmpeg missing")):
         _convert_batch([wav1, wav2])  # must not raise
+
+
+# --- ffmpeg preflight (FIX #14a) ---
+
+def test_compile_yields_error_when_ffmpeg_missing(tmp_path, settings):
+    settings.OUTPUTS_DIR = tmp_path
+    _setup_output_dir(tmp_path)
+    with patch("reader.compile.shutil.which", return_value=None):
+        events = list(run_compile(CONTENT_HASH))
+    assert any("error" in e and "ffmpeg" in e for e in events)
+    assert not any("done" in e for e in events)
+
+
+def test_compile_ffmpeg_missing_short_circuits_before_model(tmp_path, settings):
+    settings.OUTPUTS_DIR = tmp_path
+    _setup_output_dir(tmp_path)
+    with patch("reader.compile.shutil.which", return_value=None):
+        with patch("reader.compile.get_chatterbox_model") as mock_model:
+            events = list(run_compile(CONTENT_HASH))
+    # Preflight must return before touching the (expensive) model.
+    mock_model.assert_not_called()
+    assert any("ffmpeg not found" in e for e in events)
+
+
+# --- concat-list single-quote escaping (FIX #14b) ---
+
+def test_concat_list_entry_escapes_single_quote(tmp_path):
+    path = tmp_path / "Bob's voice.mp3"
+    entry = _concat_list_entry(path)
+    # ffmpeg concat rule: a literal ' becomes the sequence '\''
+    assert "'\\''" in entry
+    assert entry.startswith("file '")
+    assert entry.endswith("'")
+    # The raw, unescaped apostrophe-space sequence must not survive.
+    assert "Bob's" not in entry
+
+
+def test_concat_list_entry_plain_path_unchanged(tmp_path):
+    path = tmp_path / "01_narrator.mp3"
+    entry = _concat_list_entry(path)
+    assert entry == f"file '{path.absolute()}'"
+
+
+def test_concatenate_mp3s_writes_escaped_filelist(tmp_path):
+    compiled_dir = tmp_path / "Bob's compiled"
+    compiled_dir.mkdir()
+    (compiled_dir / "1_a.mp3").write_bytes(b"fake")
+    (compiled_dir / "2_b.mp3").write_bytes(b"fake")
+
+    captured = {}
+
+    def fake_run(cmd, *args, **kwargs):
+        list_path = compiled_dir / "filelist.txt"
+        captured["content"] = list_path.read_text(encoding="utf-8")
+        return MagicMock()
+
+    with patch("reader.compile.subprocess.run", side_effect=fake_run):
+        _concatenate_mp3s(compiled_dir)
+
+    # Every entry for the quote-bearing dir must be escaped.
+    assert "'\\''" in captured["content"]
+    assert "Bob's compiled" not in captured["content"]

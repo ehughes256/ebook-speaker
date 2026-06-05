@@ -71,7 +71,8 @@ def _make_mock_model():
     return mock_model
 
 
-def test_generate_voice_sample_writes_wav(tmp_path):
+def test_generate_voice_sample_writes_wav(tmp_path, settings):
+    settings.ELEVENLABS_API_KEY = ""  # force the local Qwen path (no real API call)
     speaker = {"name": "Alice", "sex": "female", "age": "30s", "traits": "brave"}
     with patch("reader.tts.get_tts_model", return_value=_make_mock_model()):
         result = generate_voice_sample(speaker, tmp_path)
@@ -79,14 +80,16 @@ def test_generate_voice_sample_writes_wav(tmp_path):
     assert result.exists()
 
 
-def test_generate_voice_sample_slugifies_filename(tmp_path):
+def test_generate_voice_sample_slugifies_filename(tmp_path, settings):
+    settings.ELEVENLABS_API_KEY = ""  # force the local Qwen path (no real API call)
     speaker = {"name": "Mr. Darcy", "sex": "male", "age": "late 20s", "traits": "proud"}
     with patch("reader.tts.get_tts_model", return_value=_make_mock_model()):
         result = generate_voice_sample(speaker, tmp_path)
     assert result.name == "mr_darcy.wav"
 
 
-def test_generate_voice_sample_passes_instruct_to_model(tmp_path):
+def test_generate_voice_sample_passes_instruct_to_model(tmp_path, settings):
+    settings.ELEVENLABS_API_KEY = ""  # force the local Qwen path (no real API call)
     speaker = {"name": "Alice", "sex": "female", "age": "30s", "traits": "brave, kind"}
     mock_model = _make_mock_model()
     with patch("reader.tts.get_tts_model", return_value=mock_model):
@@ -96,7 +99,8 @@ def test_generate_voice_sample_passes_instruct_to_model(tmp_path):
     assert "brave" in call_kwargs["instruct"]
 
 
-def test_generate_voice_sample_uses_sample_text(tmp_path):
+def test_generate_voice_sample_uses_sample_text(tmp_path, settings):
+    settings.ELEVENLABS_API_KEY = ""  # force the local Qwen path (no real API call)
     from reader.tts import SAMPLE_TEXT
     speaker = {"name": "Alice", "sex": "female", "age": "30s", "traits": "brave"}
     mock_model = _make_mock_model()
@@ -106,7 +110,8 @@ def test_generate_voice_sample_uses_sample_text(tmp_path):
     assert call_kwargs["text"] == SAMPLE_TEXT
 
 
-def test_generate_voice_sample_narrator(tmp_path):
+def test_generate_voice_sample_narrator(tmp_path, settings):
+    settings.ELEVENLABS_API_KEY = ""  # force the local Qwen path (no real API call)
     speaker = {"name": "NARRATOR", "sex": "unknown", "age": "unknown", "traits": ""}
     mock_model = _make_mock_model()
     with patch("reader.tts.get_tts_model", return_value=mock_model):
@@ -221,3 +226,102 @@ def test_synthesize_line_raises_on_empty_audio(tmp_path):
     with patch("reader.tts.get_chatterbox_model", return_value=mock_model):
         with pytest.raises(RuntimeError, match="empty audio"):
             synthesize_line("Hello.", wav_file)
+
+
+# --- Thread-safe singleton initialization (FIX #13) ---
+
+import threading
+
+
+def _patched_loaders(qwen_loader, chatterbox_loader):
+    """Build sys.modules patches whose from_pretrained call a counting loader."""
+    qwen_cls = MagicMock()
+    qwen_cls.from_pretrained.side_effect = qwen_loader
+    chatterbox_cls = MagicMock()
+    chatterbox_cls.from_pretrained.side_effect = chatterbox_loader
+    return {
+        "torch": MagicMock(),
+        "qwen_tts": MagicMock(Qwen3TTSModel=qwen_cls),
+        "chatterbox": MagicMock(),
+        "chatterbox.tts": MagicMock(ChatterboxTTS=chatterbox_cls),
+    }
+
+
+def test_get_tts_model_initializes_once_under_concurrency():
+    import reader.tts as tts_module
+    calls = []
+    instance = MagicMock()
+
+    def loader(*args, **kwargs):
+        # Simulate slow CUDA load to widen the race window.
+        calls.append(1)
+        threading.Event().wait(0.01)
+        return instance
+
+    original = tts_module._model
+    tts_module._model = None
+    results = []
+    try:
+        with patch.dict("sys.modules", _patched_loaders(loader, MagicMock())):
+            def worker():
+                results.append(tts_module.get_tts_model())
+
+            threads = [threading.Thread(target=worker) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        assert len(calls) == 1
+        assert all(r is instance for r in results)
+        assert len(results) == 8
+    finally:
+        tts_module._model = original
+
+
+def test_get_tts_model_repeated_calls_initialize_once():
+    import reader.tts as tts_module
+    calls = []
+    instance = MagicMock()
+
+    def loader(*args, **kwargs):
+        calls.append(1)
+        return instance
+
+    original = tts_module._model
+    tts_module._model = None
+    try:
+        with patch.dict("sys.modules", _patched_loaders(loader, MagicMock())):
+            for _ in range(5):
+                assert tts_module.get_tts_model() is instance
+        assert len(calls) == 1
+    finally:
+        tts_module._model = original
+
+
+def test_get_chatterbox_model_initializes_once_under_concurrency():
+    import reader.tts as tts_module
+    calls = []
+    instance = MagicMock()
+
+    def loader(*args, **kwargs):
+        calls.append(1)
+        threading.Event().wait(0.01)
+        return instance
+
+    original = tts_module._chatterbox_model
+    tts_module._chatterbox_model = None
+    results = []
+    try:
+        with patch.dict("sys.modules", _patched_loaders(MagicMock(), loader)):
+            def worker():
+                results.append(tts_module.get_chatterbox_model())
+
+            threads = [threading.Thread(target=worker) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        assert len(calls) == 1
+        assert all(r is instance for r in results)
+    finally:
+        tts_module._chatterbox_model = original

@@ -1,5 +1,6 @@
 import logging
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -111,13 +112,24 @@ def _convert_to_mp3(wav_path: Path) -> Path:
     return mp3_path
 
 
+def _concat_list_entry(path: Path) -> str:
+    """Format a single ffmpeg concat demuxer entry, escaping single quotes.
+
+    The concat demuxer wraps the path in single quotes; a literal quote in the
+    path must be written as the sequence '\\'' (close-quote, escaped quote,
+    reopen-quote) or the demuxer will mis-parse the line.
+    """
+    escaped = str(path.absolute()).replace("'", "'\\''")
+    return f"file '{escaped}'"
+
+
 def _concatenate_mp3s(compiled_dir: Path) -> Path:
     mp3_files = sorted(f for f in compiled_dir.glob("*.mp3") if f.name != "full.mp3")
     if not mp3_files:
         raise RuntimeError("No MP3 files to concatenate")
     list_path = compiled_dir / "filelist.txt"
     list_path.write_text(
-        "\n".join(f"file '{p.absolute()}'" for p in mp3_files),
+        "\n".join(_concat_list_entry(p) for p in mp3_files),
         encoding="utf-8",
     )
     out_path = compiled_dir / "full.mp3"
@@ -139,12 +151,15 @@ def _convert_batch(wav_paths: list[Path]) -> None:
     for wav_path in wav_paths:
         try:
             _convert_to_mp3(wav_path)
-        except Exception as exc:
+        except Exception:
             logger.exception("Failed to convert %s to MP3", wav_path.name)
 
 
 def run_compile(content_hash: str, chapter: int | None = None):
     """Generator that synthesizes each annotated segment with the speaker's cloned voice and yields SSE strings."""
+    if shutil.which("ffmpeg") is None:
+        yield "data: error ffmpeg not found on PATH.\n\n"
+        return
     try:
         import json as _json
         import soundfile as sf

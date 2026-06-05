@@ -146,6 +146,10 @@ outputs/<sha256>/
       …
 ```
 
+In `speakers.txt`, any name, alias, or field value containing a delimiter is
+backslash-escaped — `\` → `\\`, `|` → `\p`, `,` → `\c`, newline → `\n` — so each speaker
+stays on one physical line and survives a write→read round-trip (`reader/output.py`).
+
 ### Settings
 
 `config/settings.py` uses `python-decouple`. Key custom settings (all from env/`.env`):
@@ -153,7 +157,10 @@ outputs/<sha256>/
 - `OPENAI_MODEL` — defaults to `gpt-5.4-mini`
 - `ELEVENLABS_API_KEY` — used by `reader/tts.py` (required to load; empty forces Qwen fallback)
 - `DB_ENGINE` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` — PostgreSQL connection
-- `SECRET_KEY`, `DEBUG`
+- `DEBUG` — defaults to **`False`**; set `DEBUG=True` in `.env` for local dev
+- `SECRET_KEY` — required when `DEBUG` is `False` (raises `ImproperlyConfigured` if unset); a throwaway dev fallback is used only when `DEBUG=True`
+- `ALLOWED_HOSTS` — comma-separated (`Csv`), defaults to `127.0.0.1,localhost`. The app has no login; access control relies on binding to localhost only
+- `MAX_UPLOAD_MB` — defaults to `50`; caps upload file and pasted-text size and sets `DATA_UPLOAD_MAX_MEMORY_SIZE`
 - `OUTPUTS_DIR` — defaults to `BASE_DIR / "outputs"`
 
 ### Testing notes

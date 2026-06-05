@@ -10,9 +10,12 @@ MOCK_ANNOTATED = '[NARRATOR] Once upon a time.\n[ALICE | mood=happy] "Hello!"'
 
 
 class FullFlowTest(TestCase):
+    # close_old_connections() inside stream_view's generator would drop the TestCase's
+    # transaction connection mid-test; patch it to a no-op (prod behavior is unaffected).
+    @patch("django.db.close_old_connections")
     @patch("reader.pipeline.annotate_chunk", return_value=MOCK_ANNOTATED)
     @patch("reader.pipeline.extract_speakers", return_value=MOCK_SPEAKERS)
-    def test_upload_to_results_full_flow(self, mock_extract, mock_annotate):
+    def test_upload_to_results_full_flow(self, mock_extract, mock_annotate, mock_close):
         with tempfile.TemporaryDirectory() as tmp_dir:
             with self.settings(OUTPUTS_DIR=tmp_dir):
                 # Upload
